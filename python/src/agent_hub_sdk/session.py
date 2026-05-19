@@ -49,7 +49,7 @@ from agent_hub_sdk.transport import (
 )
 
 if TYPE_CHECKING:
-    pass
+    from agent_hub_sdk.commands import CommandRouter
 
 logger = logging.getLogger(__name__)
 
@@ -88,8 +88,13 @@ _INBOX_OUTPUT_CAPACITY = 1024
 # yielding to the consumer. See issue #10 for motivation: lets operators
 # verify a bridge's inbox listener is alive without spending tokens on an
 # LLM round-trip.
+#
+# M2.1 (= issue #13, design issue #10 Rev 2): the reply is plain text
+# ``pong``, not the command-format ``/pong``. agent-hub#92 was updated
+# in lockstep. Bridges that want the slash-prefix form can override
+# ``/ping`` via ``CommandRouter`` (see :mod:`agent_hub_sdk.commands`).
 _PING_TOKEN = "/ping"
-_PONG_REPLY = "/pong"
+_PONG_REPLY = "pong"
 
 
 class HubSession:
@@ -108,6 +113,31 @@ class HubSession:
         self._session = session
         self._config = config
         self._notify_recv = notify_recv
+        # ``/status`` built-in handler reads this string. Bridges update
+        # it via :meth:`set_status`; default is ``"idle"`` so a bridge
+        # that never calls ``set_status`` still answers ``/status``
+        # sensibly. See :mod:`agent_hub_sdk.commands` for the protocol.
+        self._status: str = "idle"
+
+    def set_status(self, value: str) -> None:
+        """Update the value returned by the built-in ``/status`` command.
+
+        Bridges call this from their work loop so an operator hitting
+        ``/status`` from the outside sees the current state. Conventional
+        values are ``"idle"`` (default), ``"busy"``, ``"rate-limited"``,
+        but any non-empty string is allowed — the SDK does not validate.
+
+        Side-effect-free apart from the in-memory write; safe to call
+        from any task that has a reference to the session. (The SDK runs
+        the inbox loop in one task only, so concurrent writes from
+        multiple producer coroutines aren't a real concern in practice;
+        the field is a plain attribute, not a lock-guarded structure.)
+        """
+        if not isinstance(value, str) or not value:
+            raise ValueError(
+                f"set_status: value must be a non-empty str (got {value!r})"
+            )
+        self._status = value
 
     @classmethod
     @asynccontextmanager
@@ -318,6 +348,7 @@ class HubSession:
     async def inbox(
         self,
         *,
+        commands: CommandRouter | None = None,
         auto_pong: bool = True,
         poll_interval_s: float | None = None,
         heartbeat_interval_s: float = _DEFAULT_HEARTBEAT_INTERVAL_S,
@@ -346,14 +377,21 @@ class HubSession:
         Push and poll share a lock so the two never double-process the
         same batch of unread.
 
-        :param auto_pong: when ``True`` (default), messages whose body
-            equals ``"/ping"`` (after stripping whitespace) are intercepted
-            inside the SDK: a ``"/pong"`` reply is sent back, the message
-            is acked, and the iterator does **not** yield it to the caller.
-            This is the SDK-level health check (issue #10): operators can
-            verify a bridge's listener is alive without spending tokens on
-            an LLM round-trip. Set to ``False`` if the consumer wants to
-            handle ``/ping`` itself.
+        :param commands: optional :class:`~agent_hub_sdk.commands.CommandRouter`.
+            Messages whose body starts with ``/`` are routed through it;
+            see :mod:`agent_hub_sdk.commands` for the full dispatch
+            semantics. When ``None`` (the default), the legacy
+            ``auto_pong`` parameter takes effect for backward compat:
+            ``auto_pong=True`` (the M2 default) is equivalent to passing
+            ``commands=CommandRouter()`` (= ``/ping`` built-in,
+            ``/status``, ``/help``, plus ``unknown="reject"``).
+            ``auto_pong=False`` is equivalent to ``commands=None`` (= no
+            command interception). Passing ``commands=`` explicitly
+            **always** wins over ``auto_pong``.
+        :param auto_pong: M2 legacy flag — see ``commands``. Kept for
+            backward compatibility with bridges that haven't migrated to
+            the explicit router yet. Slated for deprecation in a later
+            milestone.
         :param poll_interval_s: safety-net poll interval. ``None`` (default)
             uses ``$AGENT_HUB_INBOX_POLL_INTERVAL_S`` if set, otherwise 30s.
         :param heartbeat_interval_s: liveness-probe interval. Default 60s.
@@ -408,13 +446,35 @@ class HubSession:
             max_buffer_size=_INBOX_OUTPUT_CAPACITY
         )
 
+        # Resolve which drain function to use. Two paths:
+        #
+        # - ``commands=router`` (M2.1 new path): every drained message
+        #   goes through ``router.dispatch``; handled messages are not
+        #   yielded, yielded messages still need a consumer ack.
+        # - ``commands=None`` (M2 legacy path): only ``/ping`` is
+        #   intercepted, governed by ``auto_pong``. This is the existing
+        #   default for back-compat with bridges that haven't migrated
+        #   to ``CommandRouter`` yet.
+        #
+        # Note: the ``/ping`` reply token itself changed from ``/pong``
+        # to plain ``pong`` in M2.1 (= agent-hub#92 alignment). Bridges
+        # on either path see that textual change.
+        if commands is not None:
+            async def _drain() -> list[IncomingMessage]:
+                return await self._drain_with_router(commands)
+        else:
+            async def _drain() -> list[IncomingMessage]:
+                return await self._drain_intercepting_ping(
+                    auto_pong=auto_pong
+                )
+
         # Subscribe before draining so push events emitted *during* the
         # initial drain don't slip through the gap.
         await self.subscribe_inbox()
 
         # Startup drain: pick up anything queued before subscribe took
         # effect, and ack any /ping that snuck in pre-subscribe.
-        for msg in await self._drain_intercepting_ping(auto_pong=auto_pong):
+        for msg in await _drain():
             try:
                 send_stream.send_nowait(msg)
             except anyio.WouldBlock:
@@ -431,9 +491,7 @@ class HubSession:
             """Drain whenever the server emits an inbox push."""
             async for _uri in self.inbox_pushes():
                 async with drain_lock:
-                    for m in await self._drain_intercepting_ping(
-                        auto_pong=auto_pong
-                    ):
+                    for m in await _drain():
                         try:
                             send_stream.send_nowait(m)
                         except anyio.WouldBlock:
@@ -446,9 +504,7 @@ class HubSession:
             while True:
                 await anyio.sleep(resolved_poll)
                 async with drain_lock:
-                    for m in await self._drain_intercepting_ping(
-                        auto_pong=auto_pong
-                    ):
+                    for m in await _drain():
                         try:
                             send_stream.send_nowait(m)
                         except anyio.WouldBlock:
@@ -474,6 +530,48 @@ class HubSession:
                 # died and one of the inner tasks raised). Cancel the peer
                 # tasks so we don't leak running coroutines.
                 tg.cancel_scope.cancel()
+
+    async def _drain_with_router(
+        self, router: CommandRouter
+    ) -> list[IncomingMessage]:
+        """Fetch unread, route through ``router``, return what to yield.
+
+        Internal helper for :meth:`inbox` when called with
+        ``commands=router``. Mirrors the older
+        :meth:`_drain_intercepting_ping` shape but delegates the
+        intercept decision to the user-supplied router.
+
+        Handled messages (= dispatch returned ``"handled"``) are already
+        replied to + acked by the router. They are **not** in the
+        returned list — the inbox iterator should not yield them to the
+        consumer.
+
+        Yielded messages (= dispatch returned ``"yield"``) are kept in
+        the returned list. The consumer is responsible for acking them
+        after processing (same contract as
+        :meth:`_drain_intercepting_ping`).
+        """
+        messages = await self.get_unread()
+        yielded: list[IncomingMessage] = []
+        for msg in messages:
+            try:
+                result = await router.dispatch(msg, self)
+            except Exception:
+                # Router.dispatch is supposed to catch handler errors
+                # internally; if something escapes, we still mustn't
+                # tear down the inbox iterator. Log and yield so the
+                # consumer at least sees the message — but don't ack
+                # (= the consumer's job to decide).
+                logger.exception(
+                    "command router crashed on message %s; yielding to consumer",
+                    msg.id,
+                )
+                yielded.append(msg)
+                continue
+            if result == "yield":
+                yielded.append(msg)
+            # result == "handled" → router already acked, drop from yield
+        return yielded
 
     async def _drain_intercepting_ping(
         self, *, auto_pong: bool
