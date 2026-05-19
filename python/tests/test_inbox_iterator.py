@@ -115,7 +115,7 @@ class TestDrainInterceptingPing:
             c for c in mcp.call_tool.await_args_list
             if c.args[0] == "send_message"
         )
-        assert send_call.args[1] == {"to": "@operator", "message": "/pong"}
+        assert send_call.args[1] == {"to": "@operator", "message": "pong"}
         # ``mark_as_read`` matches the /ping message id
         ack_call = next(
             c for c in mcp.call_tool.await_args_list
@@ -267,7 +267,7 @@ class TestInboxIterator:
             c for c in mcp.call_tool.await_args_list
             if c.args[0] == "send_message"
         ]
-        assert any(c.args[1] == {"to": "@alice", "message": "/pong"} for c in send_calls)
+        assert any(c.args[1] == {"to": "@alice", "message": "pong"} for c in send_calls)
 
     async def test_auto_pong_false_yields_ping_to_consumer(self) -> None:
         # opt-out: caller wants to see /ping themselves.

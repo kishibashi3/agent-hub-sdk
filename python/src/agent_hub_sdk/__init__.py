@@ -23,6 +23,12 @@ is internal and may change without notice.
 """
 
 from agent_hub_sdk.client import AgentHub
+from agent_hub_sdk.commands import (
+    CommandHandler,
+    CommandRouter,
+    DispatchResult,
+    parse_command,
+)
 from agent_hub_sdk.config import Config, Mode, resolve_config
 from agent_hub_sdk.errors import (
     ConfigurationError,
@@ -37,8 +43,11 @@ from agent_hub_sdk.version import __version__
 
 __all__ = [
     "AgentHub",
+    "CommandHandler",
+    "CommandRouter",
     "Config",
     "ConfigurationError",
+    "DispatchResult",
     "HubErrorKind",
     "HubSession",
     "HubTransientError",
@@ -48,5 +57,6 @@ __all__ = [
     "PeerNotFoundError",
     "__version__",
     "classify_hub_error",
+    "parse_command",
     "resolve_config",
 ]

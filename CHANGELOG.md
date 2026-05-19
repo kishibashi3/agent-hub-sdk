@@ -8,11 +8,22 @@ Until `v1.0.0`, breaking changes between minor versions are possible. Each relea
 
 > Section ordering within `[Unreleased]` follows the [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) spec: `Added` → `Changed` → `Deprecated` → `Removed` → `Fixed` → `Security`. Entries within a section may be reverse-chronological.
 
-### Changed — M1 polish follow-up (issue #9)
+### Added — M2.1 command routing (issue #13, design in #10 Rev 1 + Rev 2)
 
-- `config.py`: removed the redundant trailing `or None` from the four `resolved_*` fallback chains (`env_map.get(...)` already returns `None` on a missing key). PR #8 review Minor 1.
-- `session.py`: `inbox_pushes()` docstring gained a "single-consumer only" note explaining that the underlying memory stream can be iterated by at most one coroutine, and pointing fan-out use cases at `inbox()` instead. PR #8 review Suggestion 1.
-- `tests/test_session.py`: new `test_max_attempts_one_means_no_retry` pins the `send_with_retry(max_attempts=1)` intent — a transient on attempt 1 raises without sleeping. PR #8 review Suggestion 5.
+- `agent_hub_sdk.commands.CommandRouter` — user-extensible dispatch table for `/<verb>` command messages. Pass to `hub.inbox(commands=router)` to intercept commands at the SDK layer.
+  - `@router.command(path, *, description=None)` registers a handler with signature `async def fn(msg, hub, args) -> str | None`. Return a string for an auto-reply, `None` for silent (the SDK still acks).
+  - `router.passthrough(path, *, description=None)` marks a command as known but yields to the consumer (= LLM-handled).
+  - `CommandRouter(builtins=True, unknown="reject", reject_format="command not found: {cmd}")` — built-ins on by default; unknown commands auto-reply with the configured format. Set `unknown="yield"` for chat bridges that want unknown `/foo` to flow to the consumer.
+- `parse_command(text)` helper — splits `"/list verbose"` into `("/list", "verbose")`. Same parser the router uses; exposed for bridges that opt out of the router.
+- Built-in protocol commands (default `CommandRouter()`):
+  - `/ping` → `pong` (plain text). **Behaviour change from M2**: the reply changed from `/pong` to plain `pong` to match `agent-hub#92` Rev 2.
+  - `/status` → bridge state. New `HubSession.set_status(value)` API lets bridges update the response (default `"idle"`).
+  - `/help` → auto-generated command list with descriptions, gathered from registered handlers + passthroughs + built-ins.
+  - Unknown `/foo` → `command not found: /foo` (plain text), configurable via `reject_format`.
+- `HubSession.inbox(commands=router, ...)` new kwarg. Backward-compatible with M2 `auto_pong=True` — when `commands=None` (the default) the existing `auto_pong` path still triggers, only the textual reply changes from `/pong` to `pong`.
+- 34 new pytest cases (`tests/test_commands.py`): `parse_command` corner cases, registration validation, dispatch precedence (4 states × yield/reject), all built-ins (`/ping` / `/status` / `/help` including override paths), passthrough vs handler precedence, exception swallowing.
+- Public exports updated: `CommandRouter`, `CommandHandler`, `DispatchResult`, `parse_command` re-exported from `agent_hub_sdk`.
+- Version bumped 0.2.0 → 0.3.0.
 
 ### Added — M2 inbox iterator (issue #6 + issue #10)
 
@@ -45,6 +56,12 @@ Until `v1.0.0`, breaking changes between minor versions are possible. Each relea
 
 - No PyPI / npm publishing. Install via `pip install git+...` or `npm install github:...`.
 - Public API surface is intentionally the bare version constant. M1 lands the real `AgentHub.connect` extracted from `bridge-slack/hub.py`.
+
+### Changed — M1 polish follow-up (issue #9)
+
+- `config.py`: removed the redundant trailing `or None` from the four `resolved_*` fallback chains (`env_map.get(...)` already returns `None` on a missing key). PR #8 review Minor 1.
+- `session.py`: `inbox_pushes()` docstring gained a "single-consumer only" note explaining that the underlying memory stream can be iterated by at most one coroutine, and pointing fan-out use cases at `inbox()` instead. PR #8 review Suggestion 1.
+- `tests/test_session.py`: new `test_max_attempts_one_means_no_retry` pins the `send_with_retry(max_attempts=1)` intent — a transient on attempt 1 raises without sleeping. PR #8 review Suggestion 5.
 
 ### Changed — Post-M0 governance refinement
 
