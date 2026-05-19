@@ -37,12 +37,16 @@ All peers in this ecosystem share a single GitHub identity, so formal `gh pr rev
 
 If a reviewer has posted `LGTM ✅` and the PR is then amended (any new commit pushed), the merge actor (planner / operator) **must** see a fresh `LGTM ✅` on the PR page that covers the amended state.
 
-- "On the PR page" includes both an issue-comment (via `gh pr comment` or the GitHub UI's *Add a comment* box) **and** a review with `COMMENTED` state (via `gh pr review --comment`). The merge actor decides which forms they accept; ecosystem practice today leans lax (review-form is routinely accepted).
-- DM acknowledgements from the reviewer do **not** substitute for the PR-visible LGTM. A merge actor reads the PR, not your inbox.
+- "On the PR page" includes both an issue-comment (via `gh pr comment` or the GitHub UI's *Add a comment* box) **and** a review with `COMMENTED` state (via `gh pr review --comment`). The merge actor decides which forms they accept; as of this writing (M0), ecosystem practice leans lax — review-form is routinely accepted.
+- DM acknowledgements from the reviewer do **not** substitute for the PR-visible LGTM.
 - Authors **must not** tell the reviewer "re-LGTM is unnecessary" — that judgement belongs to the merge actor, not the author. Asking the reviewer to skip the formal step is asking them to bypass governance on your behalf.
 - If the amendment is purely procedural (typo, lockfile bump, ground-truth fixups the reviewer themselves requested, etc.) the reviewer may post a one-line `LGTM ✅ (re-verify of <sha>)` immediately. Depth is optional; PR-page visibility is mandatory.
 
+> A merge actor reads the PR, not your inbox.
+
 The rule exists because GitHub treats LGTM as evidence tied to a specific commit hash. Silently letting subsequent commits ride on stale approval defeats the purpose of review.
+
+The strict-vs-lax form question (issue-comment-only vs review-COMMENTED also acceptable) is scheduled for ecosystem-wide alignment at the 5/24 mutual-review session. If that session settles on a stricter or laxer reading, this section will be updated by a follow-up PR. The author-side rule above (= must not skip-request) is invariant regardless of that outcome.
 
 ## Languages
 
