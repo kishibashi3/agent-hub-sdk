@@ -100,10 +100,14 @@ def resolve_config(
             "AgentHub.connect: 'user' is required and must be non-empty"
         )
 
-    resolved_url = url or env_map.get(ENV_URL) or None
-    resolved_pat = pat or env_map.get(ENV_PAT) or None
-    resolved_tenant = tenant or env_map.get(ENV_TENANT) or None
-    resolved_display = display_name or env_map.get(ENV_DISPLAY_NAME) or None
+    # ``or`` chains short-circuit to the first truthy value, or fall through
+    # to the final operand. ``env_map.get(...)`` already returns ``None`` on
+    # a missing key, so the trailing ``or None`` previously here was a
+    # no-op and has been removed (PR #8 review, Minor 1).
+    resolved_url = url or env_map.get(ENV_URL)
+    resolved_pat = pat or env_map.get(ENV_PAT)
+    resolved_tenant = tenant or env_map.get(ENV_TENANT)
+    resolved_display = display_name or env_map.get(ENV_DISPLAY_NAME)
 
     missing: list[str] = []
     if not resolved_url:
