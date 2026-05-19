@@ -181,6 +181,30 @@ class TestSendWithRetry:
         assert session._session.call_tool.await_count == 1
         assert slept == []
 
+    async def test_max_attempts_one_means_no_retry(
+        self, session: HubSession
+    ) -> None:
+        # ``max_attempts=1`` is the "try once, never retry" shape. A
+        # transient on attempt 1 should raise immediately without sleeping
+        # (= no inter-attempt delay possible when there's only one attempt).
+        # PR #8 review Suggestion 5, pinning the intent so a future
+        # off-by-one change can't silently turn ``max_attempts=1`` into a
+        # ``2``-attempt loop.
+        session._session.call_tool = AsyncMock(
+            return_value=_text_result("503 service unavailable", is_error=True)
+        )
+        slept: list[float] = []
+
+        async def fake_sleep(delay: float) -> None:
+            slept.append(delay)
+
+        with pytest.raises(HubTransientError):
+            await session.send_with_retry(
+                "@peer", "hi", max_attempts=1, sleep_fn=fake_sleep
+            )
+        assert session._session.call_tool.await_count == 1
+        assert slept == []
+
 
 class TestInboxOperations:
     async def test_get_unread_parses_payload(

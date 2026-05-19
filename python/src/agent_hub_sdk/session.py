@@ -290,6 +290,21 @@ class HubSession:
         pushes can collapse into one fetch when traffic is bursty.
 
         Stops iterating when the session is closed.
+
+        .. note::
+           **Single-consumer only.** The underlying memory stream
+           (``self._notify_recv``) can be iterated by exactly one
+           coroutine at a time; a second concurrent ``async for`` over the
+           same :class:`HubSession` will compete with the first for events
+           and the consumer that loses a given race will block forever or
+           skip events. If you need to fan out push events to multiple
+           consumers, do it on top of :meth:`inbox` (which already merges
+           push + poll + heartbeat into one stream) or build your own
+           fan-out queue over a single ``inbox_pushes`` iterator.
+
+           This restriction matches the M1 design (and the original
+           ``bridge-claude``/``bridge-slack`` ``HubClient`` shape). Lifted
+           in PR #8 review, Suggestion 1, codified here.
         """
         async with self._notify_recv:
             async for uri in self._notify_recv:

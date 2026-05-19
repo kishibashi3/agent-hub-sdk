@@ -8,6 +8,12 @@ Until `v1.0.0`, breaking changes between minor versions are possible. Each relea
 
 > Section ordering within `[Unreleased]` follows the [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) spec: `Added` → `Changed` → `Deprecated` → `Removed` → `Fixed` → `Security`. Entries within a section may be reverse-chronological.
 
+### Changed — M1 polish follow-up (issue #9)
+
+- `config.py`: removed the redundant trailing `or None` from the four `resolved_*` fallback chains (`env_map.get(...)` already returns `None` on a missing key). PR #8 review Minor 1.
+- `session.py`: `inbox_pushes()` docstring gained a "single-consumer only" note explaining that the underlying memory stream can be iterated by at most one coroutine, and pointing fan-out use cases at `inbox()` instead. PR #8 review Suggestion 1.
+- `tests/test_session.py`: new `test_max_attempts_one_means_no_retry` pins the `send_with_retry(max_attempts=1)` intent — a transient on attempt 1 raises without sleeping. PR #8 review Suggestion 5.
+
 ### Added — M2 inbox iterator (issue #6 + issue #10)
 
 - `HubSession.inbox(auto_pong=True, poll_interval_s=None, heartbeat_interval_s=60.0)` — async context manager that yields an async iterator merging three concurrent producers into one message stream: (1) the SSE push path via `inbox_pushes()`, (2) a safety-net poll defaulting to 30s (overridable via `AGENT_HUB_INBOX_POLL_INTERVAL_S`), and (3) a `list_tools` heartbeat at 60s. Push and poll share a lock so the same unread batch is never double-processed. Bridges replace the hand-rolled task group + lock + retry from `bridge-claude/worker.py` with a single `async for msg in messages:` loop.
