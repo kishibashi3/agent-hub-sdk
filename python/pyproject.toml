@@ -1,0 +1,63 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-hub-sdk"
+dynamic = ["version"]
+description = "Unified SDK for connecting to agent-hub as plugin / bridge / client"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [
+  { name = "Kazuhiro Ishibashi" },
+]
+keywords = ["agent-hub", "mcp", "agent", "sdk"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+  # Pinned loosely on purpose — these versions are what existing bridges
+  # (bridge-slack / bridge-claude) are already running against. Tighten when
+  # M1 lands and we have a single source of truth for the floor.
+  "mcp>=1.0",
+  "anyio>=4.0",
+  "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+  "ruff>=0.6",
+]
+
+[project.urls]
+Homepage = "https://github.com/kishibashi3/agent-hub-sdk"
+Issues = "https://github.com/kishibashi3/agent-hub-sdk/issues"
+
+[tool.hatch.version]
+path = "src/agent_hub_sdk/version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_hub_sdk"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ANN", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ANN"]
