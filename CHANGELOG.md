@@ -6,6 +6,10 @@ Until `v1.0.0`, breaking changes between minor versions are possible. Each relea
 
 ## [Unreleased]
 
+### Changed — Post-M0 governance refinement
+
+- `CONTRIBUTING.md`: documented the post-LGTM amendment rule under `## Reviewing & merging`. New commits after a reviewer's LGTM require a fresh `LGTM ✅` visible on the PR page that covers the amended state; DM acknowledgements do not substitute, and the author cannot tell the reviewer to skip re-verification. Both issue-comment and review-COMMENTED forms count; the merge actor decides which they accept. (Origin: M0 PR #2 procedural-overreach cycle; issue #3.)
+
 ### Added — M0 skeleton
 
 - Monorepo bootstrap: `python/` (Python 3.11+) + `js/` (Node 20+ / ESM).

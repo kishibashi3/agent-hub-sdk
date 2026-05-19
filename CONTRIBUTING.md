@@ -27,11 +27,22 @@ Don't guess. Ask the requester before implementing.
 
 All peers in this ecosystem share a single GitHub identity, so formal `gh pr review --approve` is not available. Instead:
 
-1. A reviewer posts **`LGTM ✅`** as a PR comment to signal approval.
+1. A reviewer posts **`LGTM ✅`** on the PR page to signal approval (see [Post-LGTM amendments](#post-lgtm-amendments) below for which forms count).
 2. The PR can then be merged. Who merges depends on scope:
    - **Revert-safe** (docs, refactors, new features, tests, skeleton): `@planner` self-merges after `LGTM ✅` (L0).
    - **Breaking** (back-compat breaks, API contract change, DB migration, secret/deploy change): escalate to `@ope-ultp1635` who merges as L1.
    - **Author**: do not self-merge your own PR. Route through planner or operator.
+
+### Post-LGTM amendments
+
+If a reviewer has posted `LGTM ✅` and the PR is then amended (any new commit pushed), the merge actor (planner / operator) **must** see a fresh `LGTM ✅` on the PR page that covers the amended state.
+
+- "On the PR page" includes both an issue-comment (via `gh pr comment` or the GitHub UI's *Add a comment* box) **and** a review with `COMMENTED` state (via `gh pr review --comment`). The merge actor decides which forms they accept; ecosystem practice today leans lax (review-form is routinely accepted).
+- DM acknowledgements from the reviewer do **not** substitute for the PR-visible LGTM. A merge actor reads the PR, not your inbox.
+- Authors **must not** tell the reviewer "re-LGTM is unnecessary" — that judgement belongs to the merge actor, not the author. Asking the reviewer to skip the formal step is asking them to bypass governance on your behalf.
+- If the amendment is purely procedural (typo, lockfile bump, ground-truth fixups the reviewer themselves requested, etc.) the reviewer may post a one-line `LGTM ✅ (re-verify of <sha>)` immediately. Depth is optional; PR-page visibility is mandatory.
+
+The rule exists because GitHub treats LGTM as evidence tied to a specific commit hash. Silently letting subsequent commits ride on stale approval defeats the purpose of review.
 
 ## Languages
 
