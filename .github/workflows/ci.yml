@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  # PR pushes cancel each other; main pushes don't (= keep deploy artefacts in
+  # the future). Group key includes workflow name so this CI doesn't fight
+  # with future workflows for the same ref.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   python:
     name: Python (${{ matrix.python-version }})

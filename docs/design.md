@@ -104,6 +104,7 @@ for await (const msg of hub.inbox()) {
 
 | Error | When |
 |---|---|
+| `ConfigurationError` | Required config (`url`, `pat`) missing from **both** env and caller arg. **Fail-fast: no `localhost:3000` fallback, no implicit default URL.** This is a deliberate redline — silently pointing at the wrong hub is worse than refusing to start. The CLI / consumer must surface a clear "set `AGENT_HUB_URL` or pass `url=`" message. |
 | `PeerNotFoundError` | `send` target not registered or offline. No retry. |
 | `HubTransientError` | Server 5xx / network / timeout. SDK retries with exponential backoff inside `send_with_retry`; raised to caller if retries exhausted. |
 | `RuntimeError` (Py) / `Error` (TS) | Anything else (auth failure, schema mismatch, …). |
