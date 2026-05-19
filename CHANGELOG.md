@@ -8,6 +8,16 @@ Until `v1.0.0`, breaking changes between minor versions are possible. Each relea
 
 > Section ordering within `[Unreleased]` follows the [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) spec: `Added` → `Changed` → `Deprecated` → `Removed` → `Fixed` → `Security`. Entries within a section may be reverse-chronological.
 
+### Added — M1 Python core
+
+- Public ``AgentHub.connect(user, mode="stateful", tenant, ...)`` async context manager. Resolves config from caller args + env (``AGENT_HUB_URL``, ``GITHUB_PAT``, ``AGENT_HUB_TENANT``, ``AGENT_HUB_DISPLAY_NAME``), then opens an MCP streamable-HTTP session against agent-hub.
+- ``HubSession`` methods: ``register``, ``send``, ``send_with_retry``, ``get_unread``, ``ack``, ``subscribe_inbox``, ``inbox_pushes``, ``get_participants``, ``heartbeat``. Surface mirrors the existing ``bridge-slack``/``bridge-claude`` ``HubClient`` 1:1 for easy migration.
+- Typed dataclasses: ``IncomingMessage``, ``Participant``. Lenient JSON parsers that drop schema-drifted rows rather than crashing the whole batch.
+- Error taxonomy: ``ConfigurationError`` (= redline #1 fail-fast at code level, no implicit default URL), ``PeerNotFoundError`` (= send target offline/unregistered, no retry), ``HubTransientError`` (= 5xx/network/timeout, retry-with-backoff). All subclass ``RuntimeError`` for migration compatibility.
+- ``classify_hub_error`` patterns covering both English and Japanese agent-hub error strings (e.g. ``存在しません``, ``応答していません``).
+- Tests: 70 pytest cases (errors, config, messages, transport, session) with ``unittest.mock`` against the MCP ``ClientSession`` surface.
+- Version bumped ``0.0.0`` → ``0.1.0``.
+
 ### Added — M0 skeleton
 
 - Monorepo bootstrap: `python/` (Python 3.11+) + `js/` (Node 20+ / ESM).
