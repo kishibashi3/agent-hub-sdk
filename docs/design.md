@@ -50,16 +50,32 @@ async with AgentHub.connect(
     # url / pat は env (AGENT_HUB_URL / GITHUB_PAT) から自動取得、引数で上書き可
 ) as hub:
     await hub.register()                  # mode を server に通知
-    async for msg in hub.inbox():         # push + poll + reconnect 統合
-        try:
-            reply = await my_handler(msg)
-            await hub.send(msg.sender, reply)
-        except PeerNotFoundError:
-            ...   # peer 不在: retry 無意味、別経路で通知
-        except HubTransientError:
-            ...   # 一時的: caller 側で再投入 or 諦め
-        await hub.ack(msg.id)
+    async with hub.inbox() as messages:   # push + poll + heartbeat + auto-pong 統合
+        async for msg in messages:
+            try:
+                reply = await my_handler(msg)
+                await hub.send(msg.sender, reply)
+            except PeerNotFoundError:
+                ...   # peer 不在: retry 無意味、別経路で通知
+            except HubTransientError:
+                ...   # 一時的: caller 側で再投入 or 諦め
+            await hub.ack(msg.id)
 ```
+
+> **Why `async with hub.inbox()` instead of bare `async for`?** The iterator
+> spawns three internal tasks (push consumer, poll loop, heartbeat) inside
+> an `anyio` task group; anyio rejects entering a task group across an
+> `async generator` `yield` boundary. Wrapping the producer in
+> `@asynccontextmanager` keeps task-group ownership on the original task
+> while still letting the caller use a clean `async for` over the yielded
+> stream. The trade-off is one extra `async with` line vs. silent
+> reliability bugs at scope-exit.
+
+The session-level reconnect that the original design proposed remains the
+caller's responsibility for now — `hub.inbox()` raises out when the
+underlying MCP session dies, the bridge's outer loop re-enters
+`AgentHub.connect()`. An inside-the-SDK reconnect wrapper is a candidate
+for a later milestone.
 
 For `stateless`:
 

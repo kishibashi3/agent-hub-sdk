@@ -8,6 +8,13 @@ Until `v1.0.0`, breaking changes between minor versions are possible. Each relea
 
 > Section ordering within `[Unreleased]` follows the [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) spec: `Added` → `Changed` → `Deprecated` → `Removed` → `Fixed` → `Security`. Entries within a section may be reverse-chronological.
 
+### Added — M2 inbox iterator (issue #6 + issue #10)
+
+- `HubSession.inbox(auto_pong=True, poll_interval_s=None, heartbeat_interval_s=60.0)` — async context manager that yields an async iterator merging three concurrent producers into one message stream: (1) the SSE push path via `inbox_pushes()`, (2) a safety-net poll defaulting to 30s (overridable via `AGENT_HUB_INBOX_POLL_INTERVAL_S`), and (3) a `list_tools` heartbeat at 60s. Push and poll share a lock so the same unread batch is never double-processed. Bridges replace the hand-rolled task group + lock + retry from `bridge-claude/worker.py` with a single `async for msg in messages:` loop.
+- `/ping` → `/pong` protocol-level handler (issue #10): when `auto_pong=True` (the default), messages whose body equals `"/ping"` (post `str.strip`) are intercepted inside the SDK — a `/pong` reply is sent back, the message is acked, and the iterator does **not** yield it to the caller. Operators can verify a bridge's inbox listener is alive without spending tokens on an LLM round-trip. Opt out with `auto_pong=False`.
+- 13 new pytest cases (`tests/test_inbox_iterator.py`): startup-drain, push-driven yield, poll-driven yield, default-on auto-pong intercept, opt-out yields `/ping` to caller, heartbeat fires periodically, dead-session propagation, env-driven poll-interval override, and the underlying `_drain_intercepting_ping` helper (whitespace normalisation, non-`/ping` passthrough, send-failure resilience).
+- Public surface: `inbox` is now reachable via `AgentHub.connect(...) → hub.inbox(...)`.
+
 ### Added — M1 Python core
 
 - Public ``AgentHub.connect(user, mode="stateful", tenant, ...)`` async context manager. Resolves config from caller args + env (``AGENT_HUB_URL``, ``GITHUB_PAT``, ``AGENT_HUB_TENANT``, ``AGENT_HUB_DISPLAY_NAME``), then opens an MCP streamable-HTTP session against agent-hub.
