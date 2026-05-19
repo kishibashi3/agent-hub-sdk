@@ -11,14 +11,17 @@ This module deliberately exposes the same surface as the existing
 ``subscribe_inbox``, ``inbox_pushes``, ``heartbeat``. Consumers migrating
 off those bridges should find a 1:1 mapping.
 
-The high-level inbox iterator that fuses ``subscribe_inbox`` + safety-net
-polling + reconnect (described in ``docs/design.md`` §4) lands in **M2**;
-M1 just exposes the building blocks.
+**M2** adds :meth:`HubSession.inbox`, a high-level async iterator that
+fuses the SSE push stream, a safety-net poll, a session heartbeat, and an
+optional ``/ping`` interceptor. Consumers can now write a single
+``async for msg in hub.inbox():`` loop instead of the hand-rolled task
+group seen in ``bridge-claude``'s pre-SDK worker.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
@@ -57,6 +60,36 @@ __all__ = ["HubSession"]
 # the consumer falls behind, dropping a push is harmless because the next
 # ``get_unread`` will still see the message. 100 is generous.
 _INBOX_QUEUE_CAPACITY = 100
+
+# Default safety-net poll interval for the unified :meth:`HubSession.inbox`
+# iterator. Pull-mode fetches every N seconds so that a silently-dead SSE
+# stream (= the MCP SDK's GET-stream auto-reconnect gives up after 2 tries
+# and stays dead, see bridge-claude/worker.py for the running diagnosis)
+# can't pin the bridge in zombie state. Overridable via env so deploys with
+# different RTT / load can tune without a code change. Keep in sync with
+# ``DEFAULT_INBOX_POLL_INTERVAL_S`` in bridge-claude/worker.py.
+_DEFAULT_INBOX_POLL_INTERVAL_S = 30.0
+_INBOX_POLL_INTERVAL_ENV = "AGENT_HUB_INBOX_POLL_INTERVAL_S"
+
+# Default heartbeat interval. Long enough that we don't drum on the hub
+# uselessly, short enough that a server restart is detected within a minute.
+# 60s is the same value bridge-claude / bridge-slack run with today.
+_DEFAULT_HEARTBEAT_INTERVAL_S = 60.0
+
+# Yielded-message queue capacity inside :meth:`HubSession.inbox`. Bursts of
+# unread fetched from one push/poll cycle all land here before the consumer
+# drains them. 1024 is generous — a real bridge processes one message in
+# seconds, and we'll get a "queue overflow" warning long before silent loss.
+_INBOX_OUTPUT_CAPACITY = 1024
+
+# The protocol-level health-check command. ``hub.inbox(auto_pong=True)``
+# (the default) intercepts messages whose body equals this token (after
+# trimming whitespace) and replies with :data:`_PONG_REPLY` without
+# yielding to the consumer. See issue #10 for motivation: lets operators
+# verify a bridge's inbox listener is alive without spending tokens on an
+# LLM round-trip.
+_PING_TOKEN = "/ping"
+_PONG_REPLY = "/pong"
 
 
 class HubSession:
@@ -219,9 +252,10 @@ class HubSession:
     async def get_unread(self) -> list[IncomingMessage]:
         """Fetch unread messages for the SDK consumer.
 
-        This is the synchronous (pull-based) read; M2 will add a unified
-        async iterator that fuses push + safety-net poll + reconnect into a
-        single ``async for msg in hub.inbox()`` loop.
+        This is the low-level pull-based read; for most consumers
+        :meth:`inbox` is the right entry point because it fuses push +
+        safety-net poll + heartbeat + ``/ping`` interception into a single
+        ``async for msg in hub.inbox()`` loop.
         """
         result = await self._session.call_tool("get_messages", {})
         text = raise_for_tool_error(result, op="get_messages")
@@ -260,6 +294,210 @@ class HubSession:
         async with self._notify_recv:
             async for uri in self._notify_recv:
                 yield uri
+
+    # ------------------------------------------------------------------
+    # Inbox iterator (M2) — push + poll + heartbeat + /ping in one stream
+    # ------------------------------------------------------------------
+
+    @asynccontextmanager
+    async def inbox(
+        self,
+        *,
+        auto_pong: bool = True,
+        poll_interval_s: float | None = None,
+        heartbeat_interval_s: float = _DEFAULT_HEARTBEAT_INTERVAL_S,
+    ) -> AsyncIterator[AsyncIterator[IncomingMessage]]:
+        """Async context manager: yields an async iterator over inbox messages.
+
+        This is the SDK's "just listen to my inbox" loop. Three concurrent
+        producers feed messages into a single output queue that the caller
+        iterates with ``async for``:
+
+        1. **SSE push** — primary low-latency path. ``subscribe_inbox`` is
+           called once at startup, then :meth:`inbox_pushes` drives a drain
+           every time the server emits a notification.
+        2. **Safety-net poll** — defends against the MCP SDK's known
+           failure mode where the GET-stream auto-reconnect gives up after
+           a couple of tries and the bridge silently stops getting pushes
+           (see ``bridge-claude/worker.py`` for the historical diagnosis).
+           Polls every ``poll_interval_s`` seconds (default 30s, override
+           via the ``AGENT_HUB_INBOX_POLL_INTERVAL_S`` env var).
+        3. **Heartbeat** — every ``heartbeat_interval_s`` seconds (default
+           60s) calls ``list_tools`` as a liveness probe. If the server
+           has invalidated the session the underlying transport raises and
+           tears the whole iterator down, which propagates out to the
+           caller's reconnect loop.
+
+        Push and poll share a lock so the two never double-process the
+        same batch of unread.
+
+        :param auto_pong: when ``True`` (default), messages whose body
+            equals ``"/ping"`` (after stripping whitespace) are intercepted
+            inside the SDK: a ``"/pong"`` reply is sent back, the message
+            is acked, and the iterator does **not** yield it to the caller.
+            This is the SDK-level health check (issue #10): operators can
+            verify a bridge's listener is alive without spending tokens on
+            an LLM round-trip. Set to ``False`` if the consumer wants to
+            handle ``/ping`` itself.
+        :param poll_interval_s: safety-net poll interval. ``None`` (default)
+            uses ``$AGENT_HUB_INBOX_POLL_INTERVAL_S`` if set, otherwise 30s.
+        :param heartbeat_interval_s: liveness-probe interval. Default 60s.
+
+        **Lifecycle**: the iterator is a contract between caller and SDK
+        for the *current* session only. If the session dies (server
+        restart, transport tear-down) the iterator raises; the caller's
+        outer loop is responsible for re-entering
+        :meth:`agent_hub_sdk.AgentHub.connect` to get a fresh session. M2
+        deliberately keeps reconnect at the *caller's* layer to mirror the
+        existing bridge pattern; an inside-the-SDK reconnect wrapper is a
+        candidate for a later milestone.
+
+        **Why a context manager, not a bare generator?** The three
+        producer tasks are owned by an :func:`anyio.create_task_group`
+        block, and anyio rejects entering a task group across an
+        ``async generator`` ``yield`` boundary (cancel-scope ownership
+        ends up on the wrong task). Wrapping the task group in
+        :func:`contextlib.asynccontextmanager` keeps scope ownership on
+        the original task while still letting the caller use a clean
+        ``async for`` over the yielded receive stream.
+
+        Usage::
+
+            async with AgentHub.connect(user="my-bridge") as hub:
+                await hub.register()
+                async with hub.inbox() as messages:
+                    async for msg in messages:
+                        await my_handler(msg)
+                        await hub.ack(msg.id)
+        """
+        resolved_poll = (
+            poll_interval_s
+            if poll_interval_s is not None
+            else float(
+                os.environ.get(
+                    _INBOX_POLL_INTERVAL_ENV, _DEFAULT_INBOX_POLL_INTERVAL_S
+                )
+            )
+        )
+
+        # One lock shared by push + poll so a burst of pushes doesn't race
+        # the poll loop into double-processing the same unread batch.
+        drain_lock = anyio.Lock()
+
+        # Bounded queue that fans-in messages from push/poll to the consumer.
+        # 1024 is generous; overflow logs a warning and drops, which is safe
+        # because the underlying messages stay on the server until acked.
+        send_stream: MemoryObjectSendStream[IncomingMessage]
+        recv_stream: MemoryObjectReceiveStream[IncomingMessage]
+        send_stream, recv_stream = anyio.create_memory_object_stream(
+            max_buffer_size=_INBOX_OUTPUT_CAPACITY
+        )
+
+        # Subscribe before draining so push events emitted *during* the
+        # initial drain don't slip through the gap.
+        await self.subscribe_inbox()
+
+        # Startup drain: pick up anything queued before subscribe took
+        # effect, and ack any /ping that snuck in pre-subscribe.
+        for msg in await self._drain_intercepting_ping(auto_pong=auto_pong):
+            try:
+                send_stream.send_nowait(msg)
+            except anyio.WouldBlock:
+                # Startup drain overflowing the consumer's queue is
+                # exotic — log and drop; the message will be re-fetched on
+                # the next push or poll cycle (it stays unread on the
+                # server until the caller acks).
+                logger.warning(
+                    "startup drain queue overflow, dropping (will reappear "
+                    "on next push/poll)"
+                )
+
+        async def push_loop() -> None:
+            """Drain whenever the server emits an inbox push."""
+            async for _uri in self.inbox_pushes():
+                async with drain_lock:
+                    for m in await self._drain_intercepting_ping(
+                        auto_pong=auto_pong
+                    ):
+                        try:
+                            send_stream.send_nowait(m)
+                        except anyio.WouldBlock:
+                            logger.warning(
+                                "inbox output queue overflow (push), dropping"
+                            )
+
+        async def poll_loop() -> None:
+            """Drain every ``resolved_poll`` seconds as a safety net."""
+            while True:
+                await anyio.sleep(resolved_poll)
+                async with drain_lock:
+                    for m in await self._drain_intercepting_ping(
+                        auto_pong=auto_pong
+                    ):
+                        try:
+                            send_stream.send_nowait(m)
+                        except anyio.WouldBlock:
+                            logger.warning(
+                                "inbox output queue overflow (poll), dropping"
+                            )
+
+        async def heartbeat_loop() -> None:
+            """Periodic liveness probe; raises out if the session is dead."""
+            while True:
+                await anyio.sleep(heartbeat_interval_s)
+                await self.heartbeat()
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(push_loop)
+            tg.start_soon(poll_loop)
+            tg.start_soon(heartbeat_loop)
+            try:
+                async with recv_stream:
+                    yield recv_stream
+            finally:
+                # Consumer left the ``async with`` block (or the session
+                # died and one of the inner tasks raised). Cancel the peer
+                # tasks so we don't leak running coroutines.
+                tg.cancel_scope.cancel()
+
+    async def _drain_intercepting_ping(
+        self, *, auto_pong: bool
+    ) -> list[IncomingMessage]:
+        """Fetch unread, intercept ``/ping``, return what's left.
+
+        Internal helper for :meth:`inbox`. Pulled out as a method (rather
+        than a closure) so it's straightforward to mock in tests and so
+        the ``/ping`` handler is a single source of truth.
+
+        When ``auto_pong`` is ``True`` and a message body equals
+        :data:`_PING_TOKEN` (post ``str.strip``), this method sends
+        :data:`_PONG_REPLY` back to the sender, acks the ping, and drops
+        the message from the returned list. ``/pong`` send failures and
+        ack failures are logged-and-swallowed — a single misbehaving
+        ``/ping`` should not kill the inbox loop.
+        """
+        messages = await self.get_unread()
+        if not auto_pong:
+            return messages
+        remaining: list[IncomingMessage] = []
+        for msg in messages:
+            if msg.body.strip() != _PING_TOKEN:
+                remaining.append(msg)
+                continue
+            logger.info("[ping] from=%s → pong", msg.sender)
+            try:
+                await self.send(msg.sender, _PONG_REPLY)
+            except Exception:
+                logger.exception(
+                    "auto-pong send to %s failed (continuing)", msg.sender
+                )
+            try:
+                await self.ack(msg.id)
+            except Exception:
+                logger.exception(
+                    "auto-pong ack for %s failed (continuing)", msg.id
+                )
+        return remaining
 
     # ------------------------------------------------------------------
     # Other tools
