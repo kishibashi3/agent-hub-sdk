@@ -26,6 +26,7 @@ export {
   type CommandOptions,
   type CommandRouterOptions,
   type DispatchResult,
+  type RestartHandler,
 } from "./commands.js";
 
 export {

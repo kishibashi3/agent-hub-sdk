@@ -20,13 +20,17 @@ Public surface
 Built-in handlers
 =================
 
-A default ``CommandRouter()`` registers three universal protocol commands
+A default ``CommandRouter()`` registers four universal protocol commands
 (disable with ``CommandRouter(builtins=False)``):
 
 - ``/ping`` → ``pong`` (plain text). Inbox-listener health check.
 - ``/status`` → the value set by :meth:`HubSession.set_status` (default
   ``"idle"``). Bridges update this from their work loop.
 - ``/help`` → auto-generated list of registered commands + descriptions.
+- ``/restart`` → bridge-context reset hook (M6, issue #26). 2-stage
+  reply: SDK sends ``restarting...``, awaits a bridge-injected callback
+  registered via :meth:`CommandRouter.set_restart_handler`, then sends
+  ``ready``. Stateless / no-callback bridges just ack (no messages).
 
 Unknown ``/foo`` (no handler, no passthrough) is replied to with the
 plain text ``command not found: /foo`` and ``ack``'d, unless the router
@@ -51,6 +55,7 @@ __all__ = [
     "CommandHandler",
     "CommandRouter",
     "DispatchResult",
+    "RestartHandler",
     "parse_command",
 ]
 
@@ -94,16 +99,32 @@ _PING_REPLY = "pong"
 # ``/unknown <cmd>`` protocol response to parse.
 _DEFAULT_REJECT_FORMAT = "command not found: {cmd}"
 
+# Two-stage replies for the built-in /restart (M6, issue #26). The first
+# message is sent immediately so the operator sees the bridge accepted
+# the command; the second is sent only after the bridge's injected
+# restart callback completes. Stateless / no-callback bridges skip both
+# and just ack.
+_RESTART_ACCEPT_REPLY = "restarting..."
+_RESTART_DONE_REPLY = "ready"
+
 # Built-in command tokens and their default ``/help`` descriptions.
 # Override semantics: if a user registers a handler for one of these
 # tokens via ``@router.command(...)``, that handler wins. The default
 # description is also overridden by the registered one.
-_BUILTIN_NAMES: tuple[str, ...] = ("/ping", "/status", "/help")
+_BUILTIN_NAMES: tuple[str, ...] = ("/ping", "/status", "/help", "/restart")
 _BUILTIN_DESCRIPTIONS: dict[str, str] = {
     "/ping": "health check",
     "/status": "bridge state (idle/busy/rate-limited)",
     "/help": "show this help",
+    "/restart": "reset the bridge's session context",
 }
+
+#: ``/restart`` callback signature. The SDK awaits the callback between
+#: the two stages of the /restart reply (= ``restarting...`` → callback
+#: → ``ready``). Bridges inject one via
+#: :meth:`CommandRouter.set_restart_handler`. Stateless bridges leave
+#: it unset (= /restart becomes ack-only).
+RestartHandler = Callable[[], Awaitable[None]]
 
 # Default bridge status when ``HubSession.set_status`` has not been
 # called. Bridges that don't care about ``/status`` can leave the value
@@ -204,6 +225,38 @@ class CommandRouter:
         self._builtins_enabled = builtins
         self._unknown_mode = unknown
         self._reject_format = reject_format
+        # M6 (issue #26): bridge-injected ``/restart`` callback. ``None``
+        # means /restart is ack-only (= stateless / no-restart semantic).
+        # Set via :meth:`set_restart_handler`.
+        self._restart_handler: RestartHandler | None = None
+
+    def set_restart_handler(self, handler: RestartHandler | None) -> None:
+        """Register the callback the built-in ``/restart`` will await.
+
+        The callback is invoked between the two stages of the /restart
+        reply: the SDK sends ``restarting...`` immediately, then awaits
+        ``handler()``, then sends ``ready`` (on success) or a warning
+        (on exception). The handler should perform the bridge-specific
+        reset and return when the bridge is ready to serve new traffic.
+
+        Bridges that don't need a /restart action (= stateless, or
+        bridges where /restart is a no-op) leave the handler unset; the
+        built-in then just acks without sending any messages.
+
+        Pass ``None`` to clear a previously-registered handler.
+
+        Only one handler is supported per router; re-registering
+        overwrites. Built-in ``/restart`` is still subject to the
+        ``builtins=False`` flag (= disabling built-ins also disables
+        /restart, but a user-registered handler for ``/restart`` via
+        :meth:`command` still wins).
+        """
+        if handler is not None and not callable(handler):
+            raise TypeError(
+                "set_restart_handler: handler must be an async callable "
+                "or None"
+            )
+        self._restart_handler = handler
 
     # ------------------------------------------------------------------
     # Registration API
@@ -298,6 +351,13 @@ class CommandRouter:
 
         # 2. Built-in handler (no user override)
         if self._builtins_enabled:
+            # /restart needs custom 2-stage dispatch and an injected
+            # callback, so it lives outside _BUILTIN_HANDLERS (which is
+            # for the single-reply ``str | None`` shape). User-registered
+            # handlers for /restart already took precedence in step 1.
+            if cmd == "/restart":
+                await self._run_restart(msg, hub)
+                return "handled"
             builtin = _BUILTIN_HANDLERS.get(cmd)
             if builtin is not None:
                 # Built-in handlers receive the router as an extra arg
@@ -415,6 +475,90 @@ class CommandRouter:
             await hub.ack(msg.id)
         except Exception:
             logger.exception("could not ack %s after reject", msg.id)
+
+    async def _run_restart(
+        self, msg: IncomingMessage, hub: HubSession
+    ) -> None:
+        """Dispatch the built-in ``/restart`` command (M6, issue #26).
+
+        Two-stage protocol:
+
+        - If no restart handler is registered (= bridge is stateless or
+          opted out), just ``ack`` — no messages sent. The agent-hub
+          server still records the message as read; the operator sees
+          no reply, which is the documented ack-only semantic.
+        - If a handler is registered:
+            1. Send ``"restarting..."`` to ``msg.sender``.
+            2. Await the handler. The bridge performs its
+               context-reset work here (re-spawn Claude session, etc.).
+            3. On success: send ``"ready"``.
+            4. On exception: log + send a generic warning reply.
+            5. ``ack`` regardless (= the inbox iterator must not
+               re-see this message).
+
+        The handler ``await`` is intentionally blocking — the operator
+        observes the ordered ``restarting...`` → ``ready`` sequence and
+        knows the restart completed when ``ready`` arrives. The inbox
+        loop being paused during the handler is acceptable because the
+        bridge is, by definition, in a transient unavailable state.
+        """
+        if self._restart_handler is None:
+            # Ack-only path. Bridge declared no restart action.
+            logger.info(
+                "[command] /restart (no handler, ack-only) from=%s",
+                msg.sender,
+            )
+            try:
+                await hub.ack(msg.id)
+            except Exception:
+                logger.exception(
+                    "could not ack %s after no-op /restart", msg.id
+                )
+            return
+
+        # 1. Accept reply — sent before the handler runs so the
+        #    operator sees the bridge picked up the command even if
+        #    the handler takes seconds to complete.
+        logger.info("[command] /restart accepted from=%s", msg.sender)
+        try:
+            await hub.send(msg.sender, _RESTART_ACCEPT_REPLY)
+        except Exception:
+            # If the accept reply fails to send, still run the
+            # handler — the operator will see ``ready`` arrive later
+            # (or the warning on failure), and the restart itself is
+            # the more important side-effect.
+            logger.exception(
+                "could not send /restart accept reply"
+            )
+
+        # 2. Handler invocation. Exceptions become a warning reply.
+        try:
+            await self._restart_handler()
+        except Exception:
+            logger.exception("/restart handler failed")
+            try:
+                await hub.send(
+                    msg.sender,
+                    ":warning: /restart failed (see bridge log)",
+                )
+            except Exception:
+                logger.exception(
+                    "could not send /restart failure reply"
+                )
+        else:
+            # 3. Done reply — sent only on handler success.
+            try:
+                await hub.send(msg.sender, _RESTART_DONE_REPLY)
+            except Exception:
+                logger.exception(
+                    "could not send /restart done reply"
+                )
+
+        # 4. Always ack (= consume the message).
+        try:
+            await hub.ack(msg.id)
+        except Exception:
+            logger.exception("could not ack %s after /restart", msg.id)
 
     def _generate_help_text(self) -> str:
         """Build the ``/help`` reply from registered commands + built-ins.

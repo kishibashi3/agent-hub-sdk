@@ -43,12 +43,30 @@ const PING_REPLY = "pong";
 
 const DEFAULT_REJECT_FORMAT = "command not found: {cmd}";
 
-const BUILTIN_NAMES = ["/ping", "/status", "/help"] as const;
+// Two-stage replies for the built-in /restart (M6, issue #26). First
+// message sent immediately so the operator knows the bridge accepted
+// the command; second sent only after the bridge's injected restart
+// callback completes. Stateless / no-callback bridges skip both and
+// just ack.
+const RESTART_ACCEPT_REPLY = "restarting...";
+const RESTART_DONE_REPLY = "ready";
+
+const BUILTIN_NAMES = ["/ping", "/status", "/help", "/restart"] as const;
 const BUILTIN_DESCRIPTIONS: Record<string, string> = {
   "/ping": "health check",
   "/status": "bridge state (idle/busy/rate-limited)",
   "/help": "show this help",
+  "/restart": "reset the bridge's session context",
 };
+
+/**
+ * ``/restart`` callback signature. The SDK awaits the callback between
+ * the two stages of the /restart reply (= ``restarting...`` → callback
+ * → ``ready``). Bridges inject one via
+ * ``CommandRouter.setRestartHandler``. Stateless bridges leave it
+ * unset (= /restart becomes ack-only).
+ */
+export type RestartHandler = () => Promise<void>;
 
 /** Default bridge status when ``HubSession.setStatus`` hasn't been called. */
 export const DEFAULT_STATUS = "idle";
@@ -179,11 +197,40 @@ export class CommandRouter {
   private readonly _builtinsEnabled: boolean;
   private readonly _unknownMode: "yield" | "reject";
   private readonly _rejectFormat: string;
+  // M6 (issue #26): bridge-injected ``/restart`` callback. ``null``
+  // means /restart is ack-only (= stateless / no-restart semantic).
+  // Set via :meth:`setRestartHandler`.
+  private _restartHandler: RestartHandler | null = null;
 
   constructor(options: CommandRouterOptions = {}) {
     this._builtinsEnabled = options.builtins ?? true;
     this._unknownMode = options.unknown ?? "reject";
     this._rejectFormat = options.rejectFormat ?? DEFAULT_REJECT_FORMAT;
+  }
+
+  /**
+   * Register the callback the built-in ``/restart`` will await.
+   *
+   * The callback is invoked between the two stages of the /restart
+   * reply: the SDK sends ``restarting...`` immediately, then awaits
+   * the handler, then sends ``ready`` (on success) or a warning (on
+   * exception). The handler should perform the bridge-specific reset
+   * and resolve when the bridge is ready to serve new traffic.
+   *
+   * Bridges that don't need a /restart action (= stateless, or bridges
+   * where /restart is a no-op) leave the handler unset; the built-in
+   * then just acks without sending any messages.
+   *
+   * Pass ``null`` to clear a previously-registered handler.
+   *
+   * Only one handler is supported per router; re-registering
+   * overwrites. Built-in ``/restart`` is still subject to the
+   * ``builtins=false`` option (= disabling built-ins also disables
+   * /restart, but a user-registered handler for ``/restart`` via
+   * ``command(...)`` still wins).
+   */
+  setRestartHandler(handler: RestartHandler | null): void {
+    this._restartHandler = handler;
   }
 
   /**
@@ -247,6 +294,14 @@ export class CommandRouter {
 
     // 2. Built-in handler (no user override)
     if (this._builtinsEnabled) {
+      // /restart needs custom 2-stage dispatch + an injected callback,
+      // so it lives outside BUILTIN_HANDLERS (which is for the
+      // single-reply ``string | null`` shape). User-registered handlers
+      // for /restart already took precedence in step 1.
+      if (cmd === "/restart") {
+        await this._runRestart(msg, hub);
+        return "handled";
+      }
       const builtin = BUILTIN_HANDLERS[cmd];
       if (builtin !== undefined) {
         await this._runBuiltin(builtin, msg, hub, cmd, args);
@@ -339,6 +394,86 @@ export class CommandRouter {
     });
     await hub.ack(msg.id).catch((err) => {
       console.error(`could not ack ${msg.id} after reject:`, err);
+    });
+  }
+
+  /**
+   * Dispatch the built-in ``/restart`` command (M6, issue #26).
+   *
+   * Two-stage protocol:
+   *
+   * - If no restart handler is registered (= bridge is stateless or
+   *   opted out), just ``ack`` — no messages sent. The operator sees
+   *   no reply, which is the documented ack-only semantic.
+   * - If a handler is registered:
+   *     1. Send ``"restarting..."`` to ``msg.sender``.
+   *     2. Await the handler. The bridge performs its context-reset
+   *        work here (re-spawn Claude session, etc.).
+   *     3. On success: send ``"ready"``.
+   *     4. On exception: log + send a generic warning reply.
+   *     5. ``ack`` regardless (= the inbox iterator must not re-see
+   *        this message).
+   *
+   * The handler ``await`` is intentionally blocking — the operator
+   * observes the ordered ``restarting...`` → ``ready`` sequence and
+   * knows the restart completed when ``ready`` arrives. The inbox
+   * loop being paused during the handler is acceptable because the
+   * bridge is, by definition, in a transient unavailable state.
+   */
+  private async _runRestart(
+    msg: IncomingMessage,
+    hub: HubSession,
+  ): Promise<void> {
+    if (this._restartHandler === null) {
+      // Ack-only path. Bridge declared no restart action.
+      console.info(
+        `[command] /restart (no handler, ack-only) from=${msg.sender}`,
+      );
+      await hub.ack(msg.id).catch((err) => {
+        console.error(
+          `could not ack ${msg.id} after no-op /restart:`,
+          err,
+        );
+      });
+      return;
+    }
+
+    // 1. Accept reply — sent before the handler runs so the operator
+    //    sees the bridge picked up the command even if the handler
+    //    takes seconds to complete.
+    console.info(`[command] /restart accepted from=${msg.sender}`);
+    await hub.send(msg.sender, RESTART_ACCEPT_REPLY).catch((err) => {
+      // If the accept reply fails to send, still run the handler —
+      // the operator will see ``ready`` arrive later (or the warning
+      // on failure), and the restart itself is the more important
+      // side-effect.
+      console.error(`could not send /restart accept reply:`, err);
+    });
+
+    // 2. Handler invocation. Exceptions become a warning reply.
+    let handlerError: unknown = null;
+    try {
+      await this._restartHandler();
+    } catch (err) {
+      handlerError = err;
+      console.error(`/restart handler failed:`, err);
+      await hub
+        .send(msg.sender, ":warning: /restart failed (see bridge log)")
+        .catch((sendErr) => {
+          console.error(`could not send /restart failure reply:`, sendErr);
+        });
+    }
+
+    if (handlerError === null) {
+      // 3. Done reply — sent only on handler success.
+      await hub.send(msg.sender, RESTART_DONE_REPLY).catch((err) => {
+        console.error(`could not send /restart done reply:`, err);
+      });
+    }
+
+    // 4. Always ack (= consume the message).
+    await hub.ack(msg.id).catch((err) => {
+      console.error(`could not ack ${msg.id} after /restart:`, err);
     });
   }
 

@@ -27,6 +27,7 @@ from agent_hub_sdk.commands import (
     CommandHandler,
     CommandRouter,
     DispatchResult,
+    RestartHandler,
     parse_command,
 )
 from agent_hub_sdk.config import Config, Mode, resolve_config
@@ -55,6 +56,7 @@ __all__ = [
     "Mode",
     "Participant",
     "PeerNotFoundError",
+    "RestartHandler",
     "__version__",
     "classify_hub_error",
     "parse_command",
