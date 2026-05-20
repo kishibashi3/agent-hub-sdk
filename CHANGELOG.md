@@ -8,6 +8,14 @@ Until `v1.0.0`, breaking changes between minor versions are possible. Each relea
 
 > Section ordering within `[Unreleased]` follows the [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) spec: `Added` → `Changed` → `Deprecated` → `Removed` → `Fixed` → `Security`. Entries within a section may be reverse-chronological.
 
+### Added — TS consumer-install path (issue #21)
+
+- `js/package.json`: added a `prepare` script (`tsc -p tsconfig.json`) so that `file:` / git-URL installs of the SDK automatically build `dist/` before consumer `node_modules` linkage. Without it, downstream TS consumers (= bridge-vscode at L1 dogfood, and any future TS bridge) hit a missing-module error on first `npm install` because `main`/`types` point at `./dist/index.js` / `./dist/index.d.ts` and `dist/` is gitignored. The existing `build` / `typecheck` / etc. scripts are untouched; `prepare` is the parallel entry point invoked by npm's package-install lifecycle (`file:`, `git+`, npm-pack tarballs, etc.).
+
+### Fixed — CHANGELOG M0 install note accuracy (issue #21)
+
+- M0 `### Notes` entry: replaced the inaccurate `npm install github:...` claim. npm's git-URL install does **not** support repo subdirectories, so `npm install github:kishibashi3/agent-hub-sdk` fails out-of-the-box (the SDK lives under `js/`, no root `package.json` exists). The accurate canonical TS install path is a `file:` link against a sibling checkout (`"@kishibashi3/agent-hub-sdk": "file:../agent-hub-sdk/js"`), with the new `prepare` script auto-building `dist/`. Python's `pip install git+...#subdirectory=python` is unchanged (= pip natively supports the subdir parameter; npm does not).
+
 ### Added — M4 TypeScript port (issue #18)
 
 - `js/src/` filled in with the full Python-mirror SDK surface, 1:1 file naming: `errors.ts`, `messages.ts`, `config.ts`, `transport.ts`, `commands.ts`, `session.ts`, `client.ts`. `index.ts` re-exports the public surface for `import { AgentHub, CommandRouter, ... } from "@kishibashi3/agent-hub-sdk"`.
@@ -75,7 +83,9 @@ Until `v1.0.0`, breaking changes between minor versions are possible. Each relea
 
 ### Notes
 
-- No PyPI / npm publishing. Install via `pip install git+...` or `npm install github:...`.
+- No PyPI / npm publishing. Install via Git:
+  - Python: `pip install git+https://github.com/kishibashi3/agent-hub-sdk.git#subdirectory=python` (pip supports subdir natively).
+  - TypeScript: `"@kishibashi3/agent-hub-sdk": "file:../agent-hub-sdk/js"` against a sibling checkout (npm does not support repo subdirs in git URLs; see issue #21 for the corrected story).
 - Public API surface is intentionally the bare version constant. M1 lands the real `AgentHub.connect` extracted from `bridge-slack/hub.py`.
 
 ### Changed — M1 polish follow-up (issue #9)
