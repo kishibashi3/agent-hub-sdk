@@ -125,10 +125,15 @@ export interface CommandOptions {
 /**
  * Dispatch table for ``/`` prefix command messages.
  *
- * Construct, register handlers / passthroughs, then pass to
- * ``hub.inbox({ commands: router })``.
+ * Construct, register handlers / passthroughs, then drive
+ * ``router.dispatch`` from your inbox loop. M4 ships the low-level
+ * driver shape; a higher-level ``hub.inbox({ commands: router, ... })``
+ * convenience that wraps push + poll + heartbeat + dispatch into one
+ * call lands in a follow-up (see issue #18 Minor 2).
  *
  * ```ts
+ * import { AgentHub, CommandRouter, type IncomingMessage } from "@kishibashi3/agent-hub-sdk";
+ *
  * const router = new CommandRouter();
  *
  * router.command("/active", async (msg, hub, args) => {
@@ -137,18 +142,35 @@ export interface CommandOptions {
  *
  * router.passthrough("/explain", { description: "ask the LLM" });
  *
- * await using hub = await AgentHub.connect({ user: "my-bridge" });
+ * await using handle = await AgentHub.connect({
+ *   user: "my-bridge",
+ *   mcpClientFactory: createMyMcpClient,
+ * });
+ * const hub = handle.session;
+ *
  * await hub.register();
- * await using messages = await hub.inbox({ commands: router });
- * for await (const msg of messages) {
- *   // /ping /status /help /active → handled by router
- *   // /explain → reaches here (= passthrough)
- *   // /foo (unknown) → SDK auto-replied
- *   // natural language → reaches here
- *   await handle(msg);
- *   await hub.ack(msg.id);
+ * await hub.subscribeInbox();
+ *
+ * for await (const _uri of hub.inboxPushes()) {
+ *   const messages = await hub.getUnread();
+ *   for (const msg of messages) {
+ *     const result = await router.dispatch(msg, hub);
+ *     if (result === "yield") {
+ *       // /explain → reaches here (= passthrough)
+ *       // /foo with `unknown: "yield"` → reaches here
+ *       // natural language → reaches here
+ *       await myHandler(msg);
+ *       await hub.ack(msg.id);
+ *     }
+ *     // result === "handled" → router already sent reply + acked
+ *   }
  * }
  * ```
+ *
+ * ``/ping`` / ``/status`` / ``/help`` are intercepted by the
+ * built-in handlers; unknown ``/foo`` is auto-replied with
+ * ``command not found: /foo`` by default (configurable via
+ * ``unknown`` and ``rejectFormat``).
  */
 export class CommandRouter {
   private readonly _handlers = new Map<string, CommandHandler>();
