@@ -8,6 +8,14 @@ Until `v1.0.0`, breaking changes between minor versions are possible. Each relea
 
 > Section ordering within `[Unreleased]` follows the [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) spec: `Added` → `Changed` → `Deprecated` → `Removed` → `Fixed` → `Security`. Entries within a section may be reverse-chronological.
 
+### Added — M3 stateless mode + `hub.one_shot()` (issue #16)
+
+- `HubSession.one_shot()` — `@asynccontextmanager` that opens a brand-new MCP `ClientSession` over a fresh `streamablehttp_client`, yields a fresh `HubSession` bound to it, and tears it down on exit. The outer session is untouched. Internally delegates to `HubSession.open(self._config)`, so the inner session re-runs `initialize` and registers its own notification handler.
+- Stateless pattern documented in `docs/design.md` §3-4: the typical `mode="stateless"` consumer keeps a long-lived `AgentHub.connect` session for the SSE subscribe (= `hub.subscribe_inbox` + `hub.inbox_pushes`) and uses `hub.one_shot()` for each batch of tool calls (= read-then-write pairs against fresh transport).
+- `one_shot()` is available regardless of declared `mode`; stateful bridges can still use it to isolate particularly transactional writes from their long-lived session.
+- 10 new pytest cases (`tests/test_one_shot.py`): lifecycle (open/yield/close on both normal and exceptional exits), session independence (fresh `_session`, fresh `_status`, isolated push queue), nested use inside `AgentHub.connect`, config passthrough + fail-fast preservation.
+- Version bumped 0.3.0 → 0.4.0.
+
 ### Added — M2.1 command routing (issue #13, design in #10 Rev 1 + Rev 2)
 
 - `agent_hub_sdk.commands.CommandRouter` — user-extensible dispatch table for `/<verb>` command messages. Pass to `hub.inbox(commands=router)` to intercept commands at the SDK layer.
