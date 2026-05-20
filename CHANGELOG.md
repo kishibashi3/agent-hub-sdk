@@ -16,6 +16,10 @@ Until `v1.0.0`, breaking changes between minor versions are possible. Each relea
 
 - M0 `### Notes` entry: replaced the inaccurate `npm install github:...` claim. npm's git-URL install does **not** support repo subdirectories, so `npm install github:kishibashi3/agent-hub-sdk` fails out-of-the-box (the SDK lives under `js/`, no root `package.json` exists). The accurate canonical TS install path is a `file:` link against a sibling checkout (`"@kishibashi3/agent-hub-sdk": "file:../agent-hub-sdk/js"`), with the new `prepare` script auto-building `dist/`. Python's `pip install git+...#subdirectory=python` is unchanged (= pip natively supports the subdir parameter; npm does not).
 
+### Removed — dead `@modelcontextprotocol/sdk` dep (issue #23)
+
+- `js/package.json`: dropped `@modelcontextprotocol/sdk` from `dependencies`. The M4 source code never imports it — every reference is in comments or error-message text describing the **future** default-factory wiring that hasn't landed yet. As a result, M4 consumers were forced to install ~50 transitive packages they neither used nor exercised, and `file:`-linked consumers (= bridge-vscode at L1 dogfood, [agent-hub-bridge-vscode#21](https://github.com/kishibashi3/agent-hub-bridge-vscode/issues/21)) failed to build their `.vsix` because `vsce package` couldn't represent a path that escaped the extension root through the SDK's symlinked `node_modules/@modelcontextprotocol/sdk`. The dep will be re-declared (as `dependencies`, `peerDependencies`, or `peerDependenciesMeta.optional`) when the default factory wiring follow-up lands (= [issue #20](https://github.com/kishibashi3/agent-hub-sdk/issues/20)), and that PR can make the right choice with full context (M4 doesn't have that context yet). `js/package-lock.json` regenerated cleanly: 0 dependencies, the dev surface unchanged.
+
 ### Added — M4 TypeScript port (issue #18)
 
 - `js/src/` filled in with the full Python-mirror SDK surface, 1:1 file naming: `errors.ts`, `messages.ts`, `config.ts`, `transport.ts`, `commands.ts`, `session.ts`, `client.ts`. `index.ts` re-exports the public surface for `import { AgentHub, CommandRouter, ... } from "@kishibashi3/agent-hub-sdk"`.
@@ -27,7 +31,7 @@ Until `v1.0.0`, breaking changes between minor versions are possible. Each relea
 - 108 vitest cases (≈ Python's 128 ratio): errors (21), config (13), messages (9), transport (11), commands (30), session (23), plus the M0 smoke test. Covers fail-fast (redline #1), dispatch precedence (4 states × yield/reject), send-with-retry edge cases, push notification handler wiring.
 - TypeScript target: ES2022 / Node 20+ / ESM, strict tsconfig.
 - `package.json` version 0.0.0 → 0.4.0 to align with the Python port's tag cadence (= v0.3.0 was M2.1, v0.4.0 is M3 + M4).
-- MCP client wiring: the SDK accepts an `mcpClientFactory` from the consumer for now; the default factory wiring against `@modelcontextprotocol/sdk` lands in a small follow-up (issue #18 tracks it). This keeps the M4 PR scope tight on the API surface + tests; bridges and tests can plug in their own factory today.
+- MCP client wiring: the SDK accepts an `mcpClientFactory` from the consumer for now; the default factory wiring against `@modelcontextprotocol/sdk` lands in a follow-up (= [issue #20](https://github.com/kishibashi3/agent-hub-sdk/issues/20), which will also re-introduce the dep at the right declaration level — see issue #23). This keeps the M4 PR scope tight on the API surface + tests; bridges and tests can plug in their own factory today.
 
 ### Added — M3 stateless mode + `hub.one_shot()` (issue #16)
 
