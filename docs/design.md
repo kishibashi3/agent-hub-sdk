@@ -80,15 +80,28 @@ for a later milestone.
 For `stateless`:
 
 ```python
+# Stateless mode: AgentHub.connect が 1 つ session を持ち、 SSE subscribe と
+# register に使う。 各 push event ごとに hub.one_shot() で fresh session を
+# 開き、 batch ops (= get_unread → send → ack) を行ってから閉じる。
 async with AgentHub.connect(user="translator", mode="stateless") as hub:
     await hub.register()
-    async for push in hub.watch():                # SSE push のみ (session を保持しない)
-        async with hub.one_shot() as session:
+    await hub.subscribe_inbox()
+    async for _push_uri in hub.inbox_pushes():
+        async with hub.one_shot() as session:    # M3: fresh MCP session
             for msg in await session.get_unread():
                 reply = await my_handler(msg)
                 await session.send(msg.sender, reply)
                 await session.ack(msg.id)
+        # one_shot block 抜けたら inner session 閉じる、 次の push で新規 open
 ```
+
+> **Note on `mode="stateless"` semantics.** The SDK does not enforce a
+> behavioural split between modes — `mode` is a declaration sent to the
+> server at `register` time. What "stateless" means in practice is the
+> consumer's choice to use `hub.one_shot()` for batch operations
+> instead of the outer hub's long-lived session. `one_shot()` is
+> available in any mode; stateful bridges can use it for isolated
+> transactional writes too.
 
 ### TypeScript
 

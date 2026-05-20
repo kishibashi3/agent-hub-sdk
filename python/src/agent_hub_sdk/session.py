@@ -644,6 +644,65 @@ class HubSession:
         _ = await self._session.list_tools()
 
     # ------------------------------------------------------------------
+    # One-shot session (M3) — fresh MCP session for one batch of ops
+    # ------------------------------------------------------------------
+
+    @asynccontextmanager
+    async def one_shot(self) -> AsyncIterator[HubSession]:
+        """Open a fresh MCP session for one batch of tool calls.
+
+        Yields a brand-new :class:`HubSession` bound to its own
+        independent streamable-HTTP transport + ``ClientSession``. The
+        outer session (``self``) is not touched — its long-lived SSE
+        subscribe, push queue, and ``_status`` are all preserved.
+
+        Returns to the close-the-connection-after-each-batch shape that
+        ``client-litellm`` and other stateless workers want. Typical
+        pattern (= M3 stateless mode):
+
+        .. code-block:: python
+
+            async with AgentHub.connect(user="translator", mode="stateless") as hub:
+                await hub.register()
+                await hub.subscribe_inbox()
+
+                async for _push_uri in hub.inbox_pushes():
+                    async with hub.one_shot() as session:
+                        for msg in await session.get_unread():
+                            reply = await llm.complete(msg.body)
+                            await session.send(msg.sender, reply)
+                            await session.ack(msg.id)
+                    # one_shot block exits → fresh session closed.
+
+        **Mode-agnostic.** Available on any session regardless of the
+        ``mode`` declared at :meth:`AgentHub.connect`. Stateful bridges
+        can still use ``one_shot()`` for operations they want to isolate
+        from their long-lived session (e.g. a particularly transactional
+        write).
+
+        **Independence.** The yielded :class:`HubSession`:
+
+        - has its own MCP ``ClientSession`` (= separate ``initialize``,
+          separate notification handler, separate push queue);
+        - reads from a brand-new push stream (= the outer session's
+          push events are not delivered here);
+        - shares only the immutable :class:`Config` with the outer hub
+          (= same URL, PAT, tenant, user, mode declaration).
+
+        **Cleanup.** When the ``async with`` block exits — normally or
+        via exception — the inner session's streamable-HTTP transport
+        and ``ClientSession`` are both closed cleanly via the
+        underlying :meth:`HubSession.open` context manager.
+
+        **Status carry-over.** ``HubSession._status`` (used by the
+        built-in ``/status`` command handler) is not shared. The inner
+        session starts at the ``"idle"`` default. If a one-shot handler
+        needs to expose ``/status``, set it explicitly inside the block.
+        """
+        async with HubSession.open(self._config) as fresh:
+            yield fresh
+
+    # ------------------------------------------------------------------
     # Raw escape hatch (deliberately unstable)
     # ------------------------------------------------------------------
 
