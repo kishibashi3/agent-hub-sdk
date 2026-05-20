@@ -282,3 +282,152 @@ class TestAgentHubConnect:
         with pytest.raises(ConfigurationError):
             async with AgentHub.connect(user="me", url=None, pat=None):
                 pass  # pragma: no cover — should never reach
+
+    # M5 (issue #27): ``AgentHub.connect`` auto-registers the consumer
+    # before yielding the handle. The four tests below pin the
+    # behaviour planner GO'd in DM ``ce8ef9ef``:
+    #   - register is called exactly once during connect
+    #   - display_name falls back to user when None
+    #   - connect raises if register fails (= MCP session torn down
+    #     before exception propagates)
+    #   - post-handle manual register still works (= server pass-through,
+    #     SDK does not gate duplicates)
+    #
+    # The transport layer is mocked via ``monkeypatch`` on
+    # ``HubSession.open`` (= same pattern as ``test_one_shot.py``); we
+    # never hit a real agent-hub. The MCP ``call_tool`` is mocked at
+    # the session level so we can assert call shape + simulate failures.
+
+    @staticmethod
+    def _build_open_patch(
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        register_response: types.CallToolResult | None = None,
+        register_raises: Exception | None = None,
+    ) -> tuple[list[Config], list[HubSession]]:
+        """Patch ``HubSession.open`` to yield a stub session.
+
+        Returns ``(configs_seen, sessions_yielded)`` — used by the
+        caller to assert the connect flow.
+        """
+        from contextlib import asynccontextmanager as _acm
+
+        configs_seen: list[Config] = []
+        sessions_yielded: list[HubSession] = []
+
+        @_acm
+        async def fake_open(cls, config):
+            # Untyped signature mirrors test_one_shot.py's `fake_open`.
+            # ANN is already disabled for `tests/**` in pyproject.toml's
+            # per-file-ignores, so no `# noqa: ANN...` is needed here.
+            configs_seen.append(config)
+            _, recv = anyio.create_memory_object_stream[str](max_buffer_size=1)
+            mock_mcp = AsyncMock()
+            if register_raises is not None:
+                mock_mcp.call_tool = AsyncMock(side_effect=register_raises)
+            elif register_response is not None:
+                mock_mcp.call_tool = AsyncMock(return_value=register_response)
+            else:
+                mock_mcp.call_tool = AsyncMock(
+                    return_value=_text_result("registered: @" + config.user)
+                )
+            session = HubSession(session=mock_mcp, config=config, notify_recv=recv)
+            sessions_yielded.append(session)
+            yield session
+
+        monkeypatch.setattr(HubSession, "open", classmethod(fake_open))
+        return configs_seen, sessions_yielded
+
+    async def test_auto_registers_before_yielding_handle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # M5: connect should fire `register` exactly once during the
+        # ``async with`` enter, with the user / display_name / mode
+        # carried through from the args.
+        _, sessions = self._build_open_patch(monkeypatch)
+
+        async with AgentHub.connect(
+            user="alice",
+            mode="stateful",
+            display_name="Alice the Bridge",
+            url="https://hub.example/mcp",
+            pat="ghp",
+        ) as hub:
+            # `hub` is the yielded session — already registered by now.
+            assert hub is sessions[0]
+            # Exactly one call_tool('register', ...) so far.
+            calls = hub._session.call_tool.await_args_list
+            register_calls = [c for c in calls if c.args[0] == "register"]
+            assert len(register_calls) == 1
+            assert register_calls[0].args[1] == {
+                "name": "alice",
+                "display_name": "Alice the Bridge",
+                "mode": "stateful",
+            }
+
+    async def test_auto_register_display_name_falls_back_to_user(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # M5: when ``display_name`` is None (default), the auto-register
+        # should use ``user`` as the fallback — same semantic as a
+        # manual ``hub.register()`` call.
+        self._build_open_patch(monkeypatch)
+
+        async with AgentHub.connect(
+            user="bob",
+            mode="stateless",
+            url="https://hub.example/mcp",
+            pat="ghp",
+        ) as hub:
+            calls = hub._session.call_tool.await_args_list
+            register_call = next(c for c in calls if c.args[0] == "register")
+            assert register_call.args[1]["display_name"] == "bob"
+            assert register_call.args[1]["mode"] == "stateless"
+
+    async def test_connect_raises_when_auto_register_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # M5: if the register call raises, ``AgentHub.connect`` should
+        # raise too. The surrounding ``HubSession.open`` context manager
+        # handles cleanup on its way out, so no half-open MCP session
+        # leaks to the caller.
+        self._build_open_patch(
+            monkeypatch,
+            register_raises=HubTransientError("server unavailable"),
+        )
+        with pytest.raises(HubTransientError, match="server unavailable"):
+            async with AgentHub.connect(
+                user="carol",
+                url="https://hub.example/mcp",
+                pat="ghp",
+            ):
+                pass  # pragma: no cover — should never reach
+
+    async def test_post_connect_manual_register_passes_through(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # M5: after connect, a manual ``hub.register()`` call should
+        # still work — the SDK does not gate duplicates. The server
+        # treats the second call idempotently (refresh of display_name,
+        # harmless re-confirm, etc.), so we just verify the second
+        # call_tool reaches the MCP layer.
+        self._build_open_patch(
+            monkeypatch,
+            register_response=_text_result("registered: @dave"),
+        )
+
+        async with AgentHub.connect(
+            user="dave",
+            url="https://hub.example/mcp",
+            pat="ghp",
+        ) as hub:
+            # Auto-register already happened (call #1). Now manual:
+            text = await hub.register()
+            assert text == "registered: @dave"
+            register_calls = [
+                c
+                for c in hub._session.call_tool.await_args_list
+                if c.args[0] == "register"
+            ]
+            # Exactly 2 register calls: 1 auto + 1 manual.
+            assert len(register_calls) == 2

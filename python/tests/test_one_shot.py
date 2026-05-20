@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock
 
 import anyio
 import pytest
+from mcp import types
 
 from agent_hub_sdk import AgentHub, ConfigurationError, HubSession
 from agent_hub_sdk.config import Config
@@ -35,9 +36,28 @@ def _config(*, user: str = "me") -> Config:
 
 
 def _session(config: Config | None = None) -> HubSession:
-    """Build a HubSession with a mocked MCP session + closed push queue."""
+    """Build a HubSession with a mocked MCP session + closed push queue.
+
+    M5 (issue #27): ``AgentHub.connect()`` now auto-registers, which
+    means any test that goes through ``connect`` (`test_nested_inside_connect`
+    in particular) routes a ``call_tool("register", ...)`` through this
+    mock. Without a stubbed ``call_tool``, the bare ``AsyncMock`` returns
+    a ``MagicMock`` whose ``.isError`` is truthy → ``raise_for_tool_error``
+    raises ``RuntimeError: register failed: (no detail)``.
+
+    Stub ``call_tool`` with a success-shaped ``CallToolResult`` so
+    auto-register passes. Existing ``TestOneShotLifecycle`` tests
+    assert lifecycle (open/yield/close) rather than the call shape, so
+    this stub does not affect them.
+    """
     _send, recv = anyio.create_memory_object_stream[str](max_buffer_size=1)
     mock_mcp = AsyncMock()
+    mock_mcp.call_tool = AsyncMock(
+        return_value=types.CallToolResult(
+            content=[types.TextContent(type="text", text="registered")],
+            isError=False,
+        )
+    )
     return HubSession(
         session=mock_mcp,
         config=config or _config(),

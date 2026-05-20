@@ -428,4 +428,107 @@ describe("AgentHub.connect", () => {
     expect(seen[0]?.pat).toBe("ghp");
     await handle[Symbol.asyncDispose]();
   });
+
+  // M5 (issue #27): `AgentHub.connect` auto-registers the consumer
+  // before returning the handle. The three tests below pin the
+  // behaviour planner GO'd in DM `ce8ef9ef` — call-on-connect,
+  // raise-on-failure (fail-fast), post-handle passthrough.
+
+  it("M5: auto-registers before returning the handle", async () => {
+    const stub = stubClient({});
+    const handle = await AgentHub.connect({
+      user: "alice",
+      mode: "stateful",
+      displayName: "Alice the Bridge",
+      url: "https://hub.example/mcp",
+      pat: "ghp",
+      env: {},
+      mcpClientFactory: async () => stub.client,
+    });
+    // Exactly one `register` call should have happened during connect.
+    const registerCalls = stub.calls.filter((c) => c.tool === "register");
+    expect(registerCalls).toHaveLength(1);
+    expect(registerCalls[0]?.args).toEqual({
+      name: "alice",
+      display_name: "Alice the Bridge",
+      mode: "stateful",
+    });
+    await handle[Symbol.asyncDispose]();
+  });
+
+  it("M5: falls back display_name to user when not supplied", async () => {
+    const stub = stubClient({});
+    const handle = await AgentHub.connect({
+      user: "bob",
+      mode: "stateless",
+      // displayName intentionally omitted
+      url: "https://hub.example/mcp",
+      pat: "ghp",
+      env: {},
+      mcpClientFactory: async () => stub.client,
+    });
+    const registerCalls = stub.calls.filter((c) => c.tool === "register");
+    expect(registerCalls).toHaveLength(1);
+    expect(registerCalls[0]?.args.display_name).toBe("bob");
+    expect(registerCalls[0]?.args.mode).toBe("stateless");
+    await handle[Symbol.asyncDispose]();
+  });
+
+  it("M5: connect rejects when auto-register fails, no half-open handle", async () => {
+    // Track that the factory's client gets `close()`d on the failure
+    // path (= the just-opened MCP session is torn down before connect
+    // rejects).
+    let closeCount = 0;
+    const stub = stubClient({
+      callToolThrows: {
+        register: new Error("server unavailable"),
+      },
+    });
+    const wrapped: typeof stub.client = {
+      ...stub.client,
+      async close() {
+        closeCount++;
+        return stub.client.close();
+      },
+    };
+    await expect(
+      AgentHub.connect({
+        user: "carol",
+        url: "https://hub.example/mcp",
+        pat: "ghp",
+        env: {},
+        mcpClientFactory: async () => wrapped,
+      }),
+    ).rejects.toThrow(/transport failure|server unavailable/);
+    // The failed-register path should have closed the underlying MCP
+    // client (= handle[Symbol.asyncDispose]() ran before connect
+    // rejected). Without this, a half-open MCP transport would leak.
+    expect(closeCount).toBe(1);
+  });
+
+  it("M5: post-connect manual register passes through to server (idempotent)", async () => {
+    // After connect, a manual `hub.session.register()` should still
+    // work — the SDK does not gate duplicates; the server treats the
+    // second call idempotently (refresh of display_name, harmless
+    // re-confirm, etc.).
+    const stub = stubClient({
+      toolResponses: {
+        register: { content: [{ type: "text", text: "registered: @dave" }] },
+      },
+    });
+    const handle = await AgentHub.connect({
+      user: "dave",
+      url: "https://hub.example/mcp",
+      pat: "ghp",
+      env: {},
+      mcpClientFactory: async () => stub.client,
+    });
+    // Manual re-register after connect.
+    const text = await handle.session.register();
+    expect(text).toBe("registered: @dave");
+    // Two register calls total: 1 auto + 1 manual.
+    const registerCalls = stub.calls.filter((c) => c.tool === "register");
+    expect(registerCalls).toHaveLength(2);
+    await handle[Symbol.asyncDispose]();
+  });
 });
