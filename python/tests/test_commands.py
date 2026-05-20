@@ -344,6 +344,146 @@ class TestDispatchBuiltinHelp:
         assert result == "yield"
         assert _send_calls(mcp) == []
 
+    async def test_help_lists_restart_builtin(self) -> None:
+        # M6 (issue #26): /restart is a built-in, so /help lists it
+        # regardless of whether the bridge has registered a restart
+        # handler — the listing advertises the *protocol*, not bridge
+        # readiness.
+        session, mcp = _session()
+        router = CommandRouter()
+        await router.dispatch(_msg(body="/help"), session)
+        body = _send_calls(mcp)[0]["message"]
+        assert "/restart" in body
+        assert "reset the bridge's session context" in body
+
+
+class TestDispatchBuiltinRestart:
+    """M6 (issue #26): ``/restart`` built-in dispatch behaviour.
+
+    Two-stage protocol:
+      - No handler registered → ack-only, no send.
+      - Handler registered → send "restarting...", await handler,
+        send "ready" on success / warning on exception, then ack.
+
+    User-registered ``/restart`` handler via :meth:`CommandRouter.command`
+    overrides the built-in (= same precedence rule as /ping /status /help).
+    ``builtins=False`` disables /restart along with the other built-ins.
+    """
+
+    async def test_no_handler_registered_acks_only(self) -> None:
+        session, mcp = _session()
+        router = CommandRouter()
+        # No set_restart_handler call — bridge declared no restart action.
+        result = await router.dispatch(_msg(body="/restart"), session)
+        assert result == "handled"
+        # Stateless / no-restart semantic: no send, just ack.
+        assert _send_calls(mcp) == []
+        assert _ack_calls(mcp) == [{"message_id": "m1"}]
+
+    async def test_handler_two_stage_send_and_ack(self) -> None:
+        session, mcp = _session()
+        router = CommandRouter()
+        handler_called = False
+
+        async def my_restart() -> None:
+            nonlocal handler_called
+            handler_called = True
+            # By the time the handler runs, the accept reply must
+            # already have been sent — that's the documented protocol.
+            sends = _send_calls(mcp)
+            assert len(sends) == 1
+            assert sends[0] == {"to": "@alice", "message": "restarting..."}
+
+        router.set_restart_handler(my_restart)
+
+        result = await router.dispatch(_msg(body="/restart"), session)
+        assert result == "handled"
+        assert handler_called is True
+        assert _send_calls(mcp) == [
+            {"to": "@alice", "message": "restarting..."},
+            {"to": "@alice", "message": "ready"},
+        ]
+        assert _ack_calls(mcp) == [{"message_id": "m1"}]
+
+    async def test_handler_exception_warns_no_ready_still_acks(self) -> None:
+        session, mcp = _session()
+        router = CommandRouter()
+
+        async def failing_restart() -> None:
+            raise RuntimeError("respawn failed")
+
+        router.set_restart_handler(failing_restart)
+
+        result = await router.dispatch(_msg(body="/restart"), session)
+        assert result == "handled"
+        sends = _send_calls(mcp)
+        # 1) "restarting...", 2) warning. No "ready".
+        assert len(sends) == 2
+        assert sends[0] == {"to": "@alice", "message": "restarting..."}
+        assert "/restart failed" in sends[1]["message"]
+        assert _ack_calls(mcp) == [{"message_id": "m1"}]
+
+    async def test_user_handler_overrides_builtin(self) -> None:
+        session, mcp = _session()
+        router = CommandRouter()
+
+        @router.command("/restart")
+        async def custom_restart(msg, hub, args):
+            return "custom-restart-reply"
+
+        # Even with set_restart_handler ALSO registered, the user
+        # handler from @router.command takes precedence — same
+        # precedence rule as /ping /status /help overrides.
+        async def should_not_run() -> None:
+            raise AssertionError("user handler should win")
+
+        router.set_restart_handler(should_not_run)
+
+        result = await router.dispatch(_msg(body="/restart"), session)
+        assert result == "handled"
+        assert _send_calls(mcp) == [
+            {"to": "@alice", "message": "custom-restart-reply"}
+        ]
+        assert _ack_calls(mcp) == [{"message_id": "m1"}]
+
+    async def test_builtins_false_yields_restart(self) -> None:
+        session, mcp = _session()
+        router = CommandRouter(builtins=False, unknown="yield")
+        # Even with a restart handler registered, builtins=False skips
+        # the built-in dispatch path — shared semantic with /ping etc.
+
+        async def should_not_run() -> None:
+            raise AssertionError("should not run when builtins=False")
+
+        router.set_restart_handler(should_not_run)
+
+        result = await router.dispatch(_msg(body="/restart"), session)
+        assert result == "yield"
+        assert _send_calls(mcp) == []
+        assert _ack_calls(mcp) == []
+
+    async def test_set_restart_handler_none_clears(self) -> None:
+        session, mcp = _session()
+        router = CommandRouter()
+
+        async def cleared_handler() -> None:
+            raise AssertionError("cleared, should not run")
+
+        router.set_restart_handler(cleared_handler)
+        # Now clear.
+        router.set_restart_handler(None)
+
+        result = await router.dispatch(_msg(body="/restart"), session)
+        assert result == "handled"
+        # Back to ack-only semantic.
+        assert _send_calls(mcp) == []
+        assert _ack_calls(mcp) == [{"message_id": "m1"}]
+
+    async def test_set_restart_handler_rejects_non_callable(self) -> None:
+        router = CommandRouter()
+        with pytest.raises(TypeError, match="callable"):
+            router.set_restart_handler("not callable")  # type: ignore[arg-type]
+
 
 class TestDispatchPassthrough:
     async def test_passthrough_yields(self) -> None:

@@ -8,6 +8,23 @@ Until `v1.0.0`, breaking changes between minor versions are possible. Each relea
 
 > Section ordering within `[Unreleased]` follows the [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) spec: `Added` → `Changed` → `Deprecated` → `Removed` → `Fixed` → `Security`. Entries within a section may be reverse-chronological.
 
+### Added — M6 `/restart` built-in command (issue #26)
+
+- `CommandRouter` gains a new built-in: `/restart`. The router exposes `set_restart_handler(handler)` (Python) / `setRestartHandler(handler)` (TS) so bridges can register an async callback that performs their bridge-specific context reset (= for `bridge-claude`, exiting and re-entering the `ClaudeSDKClient` context to drop accumulated conversation state). The handler signature is `() -> Awaitable[None]` (Python) / `() => Promise<void>` (TS); the new public type `RestartHandler` is re-exported from the top-level SDK module.
+- **Two-stage reply protocol** when a handler is registered:
+  1. SDK sends `restarting...` to the sender.
+  2. SDK awaits the handler (= bridge does its reset work; the inbox loop is intentionally paused for the duration since the bridge is, by definition, in a transient unavailable state).
+  3. On handler success → SDK sends `ready`.
+  4. On handler exception → SDK logs and sends `:warning: /restart failed (see bridge log)` instead of `ready`.
+  5. SDK acks the original `/restart` message regardless of success/failure (= the inbox iterator does not re-see it).
+- **Ack-only semantic when no handler is registered** (= bridge declared no restart action, e.g. stateless bridges where each call is already fresh). The SDK acks the message without sending any reply. Per planner GO (DM `8907c7cc`): keeping this default mode-agnostic — there is no `Config.mode`-based hardcoding, the absence of a registered handler IS the signal.
+- **User-registered `/restart` handler via `@router.command("/restart")`** still wins over the built-in (= same precedence rule as `/ping`, `/status`, `/help` overrides). The built-in `_run_restart` / `_runRestart` path is only entered when no user handler is registered AND `builtins=True`.
+- **`builtins=False` disables `/restart`** along with the other built-ins. Bridges that opt out of built-ins entirely must re-implement `/restart` via `@router.command("/restart")` if they want it. Even with a registered restart-handler callback, `builtins=False` causes `/restart` to fall through to the unknown / passthrough path.
+- `/restart` shows up in the auto-generated `/help` listing with description `reset the bridge's session context`. Listing the protocol command is independent of whether the bridge has actually registered a handler (= the listing advertises the protocol surface, not bridge readiness).
+- 7 new test cases × 2 languages: ack-only-no-handler, 2-stage send + ack, handler-exception warning path, user-handler override, `builtins=False` yields, `set_restart_handler(None)` clears a previous registration, `/restart` shows in `/help`. Python tests in `tests/test_commands.py::TestDispatchBuiltinRestart`; TS tests in `js/tests/commands.test.ts` `dispatch — built-in /restart (M6, issue #26)`.
+- Pre-PR grep audit (= M5 lesson "touch point → 下流影響範囲の逆引き" applied): inventoried 5 mock-using test files, confirmed `test_commands.py::_session()` default stub of `_text_result("ok")` covers the new built-in's `hub.send` / `hub.ack` calls without drift. No `test_one_shot.py`-style cross-file fallout this cycle.
+- **Bridge integration is a separate L1 PR** (= `bridge-claude` `worker.py` restructure to move `async with ClaudeSDKClient(...)` inside the reconnect while-loop + inject a callback that signals the inner inbox loop to exit via a custom `RestartSignal` exception caught at the outer loop). The signal mechanism is bridge-internal — the SDK only provides the `setRestartHandler(callback)` contract.
+
 ### Changed — M5 auto-register on `AgentHub.connect()` (issue #27)
 
 - `AgentHub.connect(user, mode=..., display_name=..., ...)` now auto-registers the consumer with the hub before yielding the handle. Calls `register(name=user, display_name=display_name or user, mode=mode)` as part of the connect flow. Caller code no longer needs an explicit `await hub.register()` at startup; the SDK guarantees the invariant **"connect succeeded ⇒ consumer is visible in `get_participants`"** without per-bridge boilerplate. Fixes the previous risk of bridges forgetting to register and being invisible to peers (= the motivation in the issue).

@@ -224,6 +224,129 @@ describe("dispatch — built-in /help", () => {
     expect(await router.dispatch(mkMsg("/help"), hub as never)).toBe("yield");
     expect(hub.sends).toEqual([]);
   });
+
+  it("M6: /restart shows up in /help when registered as a handler-bound built-in", async () => {
+    // /restart is a built-in (M6), so /help lists it regardless of
+    // whether the bridge has actually registered a restart handler.
+    // The listing is about advertising the *protocol*, not advertising
+    // bridge readiness.
+    const router = new CommandRouter();
+    const hub = mkHub();
+    await router.dispatch(mkMsg("/help"), hub as never);
+    expect(hub.sends).toHaveLength(1);
+    const body = hub.sends[0]!.message;
+    expect(body).toContain("/restart");
+    expect(body).toContain("reset the bridge's session context");
+  });
+});
+
+describe("dispatch — built-in /restart (M6, issue #26)", () => {
+  it("no handler registered: just ack, no messages", async () => {
+    const router = new CommandRouter();
+    const hub = mkHub();
+    expect(await router.dispatch(mkMsg("/restart"), hub as never)).toBe(
+      "handled",
+    );
+    // Stateless / no-restart semantic: no send, just ack.
+    expect(hub.sends).toEqual([]);
+    expect(hub.acks).toEqual(["m1"]);
+  });
+
+  it("handler registered: 2-stage send (restarting → ready) + ack", async () => {
+    const router = new CommandRouter();
+    const hub = mkHub();
+    let handlerCalled = false;
+    let handlerCalledAfterAcceptReply = false;
+    router.setRestartHandler(async () => {
+      handlerCalled = true;
+      // The accept reply must already have been sent by the time the
+      // handler runs — that's the documented protocol.
+      handlerCalledAfterAcceptReply =
+        hub.sends.length === 1 &&
+        hub.sends[0]!.message === "restarting...";
+    });
+
+    expect(await router.dispatch(mkMsg("/restart"), hub as never)).toBe(
+      "handled",
+    );
+    expect(handlerCalled).toBe(true);
+    expect(handlerCalledAfterAcceptReply).toBe(true);
+    expect(hub.sends).toEqual([
+      { to: "@alice", message: "restarting..." },
+      { to: "@alice", message: "ready" },
+    ]);
+    expect(hub.acks).toEqual(["m1"]);
+  });
+
+  it("handler exception: warning sent, no 'ready', still ack", async () => {
+    const router = new CommandRouter();
+    const hub = mkHub();
+    router.setRestartHandler(async () => {
+      throw new Error("respawn failed");
+    });
+
+    expect(await router.dispatch(mkMsg("/restart"), hub as never)).toBe(
+      "handled",
+    );
+    // Sends: 1) "restarting...", 2) warning. No "ready".
+    expect(hub.sends).toHaveLength(2);
+    expect(hub.sends[0]?.message).toBe("restarting...");
+    expect(hub.sends[1]?.message).toContain("/restart failed");
+    expect(hub.acks).toEqual(["m1"]);
+  });
+
+  it("user-registered handler overrides built-in (= same precedence as /ping)", async () => {
+    const router = new CommandRouter();
+    const hub = mkHub();
+    router.command("/restart", async () => "custom-restart-reply");
+    // Even though setRestartHandler is *also* registered, the user
+    // handler takes precedence (= same precedence rule as for /ping
+    // /status /help overrides).
+    router.setRestartHandler(async () => {
+      throw new Error("should not run — user handler wins");
+    });
+
+    expect(await router.dispatch(mkMsg("/restart"), hub as never)).toBe(
+      "handled",
+    );
+    expect(hub.sends).toEqual([
+      { to: "@alice", message: "custom-restart-reply" },
+    ]);
+    expect(hub.acks).toEqual(["m1"]);
+  });
+
+  it("builtins=false disables /restart along with /ping /status /help", async () => {
+    const router = new CommandRouter({ builtins: false, unknown: "yield" });
+    const hub = mkHub();
+    // Even with a restart handler registered, builtins=false skips
+    // the built-in dispatch path — the message yields to the consumer
+    // (= shared semantic with the other built-ins).
+    router.setRestartHandler(async () => {
+      throw new Error("should not run when builtins=false");
+    });
+    expect(await router.dispatch(mkMsg("/restart"), hub as never)).toBe(
+      "yield",
+    );
+    expect(hub.sends).toEqual([]);
+    expect(hub.acks).toEqual([]);
+  });
+
+  it("setRestartHandler(null) clears a previously-registered handler", async () => {
+    const router = new CommandRouter();
+    const hub = mkHub();
+    router.setRestartHandler(async () => {
+      throw new Error("cleared, should not run");
+    });
+    // Now clear.
+    router.setRestartHandler(null);
+
+    expect(await router.dispatch(mkMsg("/restart"), hub as never)).toBe(
+      "handled",
+    );
+    // Back to ack-only semantic.
+    expect(hub.sends).toEqual([]);
+    expect(hub.acks).toEqual(["m1"]);
+  });
 });
 
 describe("dispatch — passthrough", () => {
