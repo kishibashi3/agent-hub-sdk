@@ -316,7 +316,10 @@ class TestAgentHubConnect:
         sessions_yielded: list[HubSession] = []
 
         @_acm
-        async def fake_open(cls, config):  # noqa: ANN001, ANN201 — mirrors test_one_shot.py
+        async def fake_open(cls, config):
+            # Untyped signature mirrors test_one_shot.py's `fake_open`.
+            # ANN is already disabled for `tests/**` in pyproject.toml's
+            # per-file-ignores, so no `# noqa: ANN...` is needed here.
             configs_seen.append(config)
             _, recv = anyio.create_memory_object_stream[str](max_buffer_size=1)
             mock_mcp = AsyncMock()
