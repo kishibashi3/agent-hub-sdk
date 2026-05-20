@@ -8,6 +8,19 @@ Until `v1.0.0`, breaking changes between minor versions are possible. Each relea
 
 > Section ordering within `[Unreleased]` follows the [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) spec: `Added` → `Changed` → `Deprecated` → `Removed` → `Fixed` → `Security`. Entries within a section may be reverse-chronological.
 
+### Added — M4 TypeScript port (issue #18)
+
+- `js/src/` filled in with the full Python-mirror SDK surface, 1:1 file naming: `errors.ts`, `messages.ts`, `config.ts`, `transport.ts`, `commands.ts`, `session.ts`, `client.ts`. `index.ts` re-exports the public surface for `import { AgentHub, CommandRouter, ... } from "@kishibashi3/agent-hub-sdk"`.
+- `AgentHub.connect({ user, mode, ... })` returns a disposable handle; consumers use `await using hub = await AgentHub.connect(...)` for automatic cleanup (mirrors Python's `async with AgentHub.connect()`).
+- `HubSession` carries the same method set as the Python class: `register`, `send`, `sendWithRetry`, `getUnread`, `ack`, `subscribeInbox`, `inboxPushes`, `getParticipants`, `heartbeat`, `setStatus`, `status` (getter).
+- `CommandRouter` mirrors the Python M2.1 router: `router.command(path, handler, { description })`, `router.passthrough(path, ...)`, `unknown: "yield" | "reject"`, `rejectFormat`. Built-in `/ping` → `pong`, `/status`, `/help` auto-generated. Functional decorator alternative since TS class decorators are still stage-3.
+- Plain-text replies (= agent-hub#92 Rev 2): `/ping` → `pong`, unknown → `command not found: /foo`.
+- `classifyHubError` patterns preserved verbatim from Python (EN + JA).
+- 108 vitest cases (≈ Python's 128 ratio): errors (21), config (13), messages (9), transport (11), commands (30), session (23), plus the M0 smoke test. Covers fail-fast (redline #1), dispatch precedence (4 states × yield/reject), send-with-retry edge cases, push notification handler wiring.
+- TypeScript target: ES2022 / Node 20+ / ESM, strict tsconfig.
+- `package.json` version 0.0.0 → 0.4.0 to align with the Python port's tag cadence (= v0.3.0 was M2.1, v0.4.0 is M3 + M4).
+- MCP client wiring: the SDK accepts an `mcpClientFactory` from the consumer for now; the default factory wiring against `@modelcontextprotocol/sdk` lands in a small follow-up (issue #18 tracks it). This keeps the M4 PR scope tight on the API surface + tests; bridges and tests can plug in their own factory today.
+
 ### Added — M3 stateless mode + `hub.one_shot()` (issue #16)
 
 - `HubSession.one_shot()` — `@asynccontextmanager` that opens a brand-new MCP `ClientSession` over a fresh `streamablehttp_client`, yields a fresh `HubSession` bound to it, and tears it down on exit. The outer session is untouched. Internally delegates to `HubSession.open(self._config)`, so the inner session re-runs `initialize` and registers its own notification handler.
