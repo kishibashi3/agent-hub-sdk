@@ -8,17 +8,21 @@ Until `v1.0.0`, breaking changes between minor versions are possible. Each relea
 
 > Section ordering within `[Unreleased]` follows the [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) spec: `Added` → `Changed` → `Deprecated` → `Removed` → `Fixed` → `Security`. Entries within a section may be reverse-chronological.
 
+## [0.5.0] - 2026-05-20
+
+> M4 TypeScript port + dogfood-driven SDK refinement cascade. Marks 4/4 bridge SDK adoption (`bridge-claude` / `bridge-slack` / `client-litellm` / `bridge-vscode`), closing the M4 dogfood-tied completion criterion. The cascade pattern — M4 PR description deferred a default-factory wiring and that deferral surfaced as a `file:` install gap (prepare script) and a dead transitive dep (vsce packaging blocker) during bridge-vscode L1 — produced 4 PRs across SDK and bridge in ~4 hours, with planner check-in at every judgment point.
+
 ### Added — TS consumer-install path (issue #21)
 
 - `js/package.json`: added a `prepare` script (`tsc -p tsconfig.json`) so that `file:` / git-URL installs of the SDK automatically build `dist/` before consumer `node_modules` linkage. Without it, downstream TS consumers (= bridge-vscode at L1 dogfood, and any future TS bridge) hit a missing-module error on first `npm install` because `main`/`types` point at `./dist/index.js` / `./dist/index.d.ts` and `dist/` is gitignored. The existing `build` / `typecheck` / etc. scripts are untouched; `prepare` is the parallel entry point invoked by npm's package-install lifecycle (`file:`, `git+`, npm-pack tarballs, etc.).
 
+### Removed — dead `@modelcontextprotocol/sdk` dep (issue #23)
+
+- `js/package.json`: dropped `@modelcontextprotocol/sdk` from `dependencies`. The M4 source code never imports it — every reference is in comments or error-message text describing the **future** default-factory wiring that hasn't landed yet. As a result, M4 consumers were forced to install ~50 transitive packages they neither used nor exercised, and `file:`-linked consumers (= bridge-vscode at L1 dogfood, [agent-hub-bridge-vscode#21](https://github.com/kishibashi3/agent-hub-bridge-vscode/issues/21)) failed to build their `.vsix` because `vsce package` couldn't represent a path that escaped the extension root through the SDK's symlinked `node_modules/@modelcontextprotocol/sdk`. The dep will be re-declared (as `dependencies`, `peerDependencies`, or `peerDependenciesMeta.optional`) when the default factory wiring follow-up lands (= [issue #20](https://github.com/kishibashi3/agent-hub-sdk/issues/20)), and that PR can make the right choice with full context (M4 doesn't have that context yet). `js/package-lock.json` regenerated cleanly: 0 runtime dependencies, the dev surface unchanged.
+
 ### Fixed — CHANGELOG M0 install note accuracy (issue #21)
 
 - M0 `### Notes` entry: replaced the inaccurate `npm install github:...` claim. npm's git-URL install does **not** support repo subdirectories, so `npm install github:kishibashi3/agent-hub-sdk` fails out-of-the-box (the SDK lives under `js/`, no root `package.json` exists). The accurate canonical TS install path is a `file:` link against a sibling checkout (`"@kishibashi3/agent-hub-sdk": "file:../agent-hub-sdk/js"`), with the new `prepare` script auto-building `dist/`. Python's `pip install git+...#subdirectory=python` is unchanged (= pip natively supports the subdir parameter; npm does not).
-
-### Removed — dead `@modelcontextprotocol/sdk` dep (issue #23)
-
-- `js/package.json`: dropped `@modelcontextprotocol/sdk` from `dependencies`. The M4 source code never imports it — every reference is in comments or error-message text describing the **future** default-factory wiring that hasn't landed yet. As a result, M4 consumers were forced to install ~50 transitive packages they neither used nor exercised, and `file:`-linked consumers (= bridge-vscode at L1 dogfood, [agent-hub-bridge-vscode#21](https://github.com/kishibashi3/agent-hub-bridge-vscode/issues/21)) failed to build their `.vsix` because `vsce package` couldn't represent a path that escaped the extension root through the SDK's symlinked `node_modules/@modelcontextprotocol/sdk`. The dep will be re-declared (as `dependencies`, `peerDependencies`, or `peerDependenciesMeta.optional`) when the default factory wiring follow-up lands (= [issue #20](https://github.com/kishibashi3/agent-hub-sdk/issues/20)), and that PR can make the right choice with full context (M4 doesn't have that context yet). `js/package-lock.json` regenerated cleanly: 0 dependencies, the dev surface unchanged.
 
 ### Added — M4 TypeScript port (issue #18)
 
@@ -33,6 +37,10 @@ Until `v1.0.0`, breaking changes between minor versions are possible. Each relea
 - `package.json` version 0.0.0 → 0.4.0 to align with the Python port's tag cadence (= v0.3.0 was M2.1, v0.4.0 is M3 + M4).
 - MCP client wiring: the SDK accepts an `mcpClientFactory` from the consumer for now; the default factory wiring against `@modelcontextprotocol/sdk` lands in a follow-up (= [issue #20](https://github.com/kishibashi3/agent-hub-sdk/issues/20), which will also re-introduce the dep at the right declaration level — see issue #23). This keeps the M4 PR scope tight on the API surface + tests; bridges and tests can plug in their own factory today.
 
+## [0.4.0] - 2026-05-19
+
+> Python M3 stateless mode + `hub.one_shot()` helper. Tag commit: `f3f3d99` (PR #17 merge).
+
 ### Added — M3 stateless mode + `hub.one_shot()` (issue #16)
 
 - `HubSession.one_shot()` — `@asynccontextmanager` that opens a brand-new MCP `ClientSession` over a fresh `streamablehttp_client`, yields a fresh `HubSession` bound to it, and tears it down on exit. The outer session is untouched. Internally delegates to `HubSession.open(self._config)`, so the inner session re-runs `initialize` and registers its own notification handler.
@@ -40,6 +48,10 @@ Until `v1.0.0`, breaking changes between minor versions are possible. Each relea
 - `one_shot()` is available regardless of declared `mode`; stateful bridges can still use it to isolate particularly transactional writes from their long-lived session.
 - 10 new pytest cases (`tests/test_one_shot.py`): lifecycle (open/yield/close on both normal and exceptional exits), session independence (fresh `_session`, fresh `_status`, isolated push queue), nested use inside `AgentHub.connect`, config passthrough + fail-fast preservation.
 - Version bumped 0.3.0 → 0.4.0.
+
+## [0.3.0] - 2026-05-19
+
+> Python M2.1 command routing — `CommandRouter` + built-in `/ping` / `/status` / `/help`, plain-text replies (= `agent-hub#92` Rev 2). Tag commit: `f63a80e` (PR #14 merge).
 
 ### Added — M2.1 command routing (issue #13, design in #10 Rev 1 + Rev 2)
 
@@ -57,6 +69,10 @@ Until `v1.0.0`, breaking changes between minor versions are possible. Each relea
 - 34 new pytest cases (`tests/test_commands.py`): `parse_command` corner cases, registration validation, dispatch precedence (4 states × yield/reject), all built-ins (`/ping` / `/status` / `/help` including override paths), passthrough vs handler precedence, exception swallowing.
 - Public exports updated: `CommandRouter`, `CommandHandler`, `DispatchResult`, `parse_command` re-exported from `agent_hub_sdk`.
 - Version bumped 0.2.0 → 0.3.0.
+
+## [Pre-v0.3.0] — untagged early milestones
+
+> The M0 / M1 / M2 / governance entries below predate the v0.3.0 tag and were never given numbered version tags of their own. Captured here for historical traceability.
 
 ### Added — M2 inbox iterator (issue #6 + issue #10)
 
