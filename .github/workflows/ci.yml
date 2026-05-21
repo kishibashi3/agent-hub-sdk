@@ -78,3 +78,9 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Verify build from cleared node_modules (issue #25 regression guard)
+        # Reproduces the failure mode discovered in agent-hub-bridge-vscode#21:
+        # the SDK's prepare hook (tsc) must compile cleanly when node_modules is
+        # cleared and reinstalled, simulating a consumer-side npm install run.
+        run: rm -rf node_modules && npm install --no-audit --no-fund && npm run build
