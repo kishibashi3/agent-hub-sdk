@@ -206,6 +206,51 @@ class TestSendWithRetry:
         assert slept == []
 
 
+class TestCallToolTimeout:
+    """Pins the SDK-level per-call timeout added in PR #8 review Suggestion 2."""
+
+    async def test_hung_call_tool_raises_transient_error(
+        self,
+        session: HubSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A call_tool that never returns raises HubTransientError (not TimeoutError).
+
+        The timeout is patched to a very short value so the test completes
+        quickly. ``anyio.sleep(3600)`` simulates a server that accepted the
+        connection but never responds — the canonical hang scenario.
+        """
+        import agent_hub_sdk.session as _sess_mod
+
+        monkeypatch.setattr(_sess_mod, "_TOOL_CALL_TIMEOUT_S", 0.05)
+
+        async def _hung(*args: object, **kwargs: object) -> None:
+            await anyio.sleep(3600)
+
+        session._session.call_tool = _hung  # type: ignore[method-assign]
+
+        with pytest.raises(HubTransientError, match="timed out"):
+            await session.get_unread()
+
+    async def test_timeout_message_includes_tool_name(
+        self,
+        session: HubSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The HubTransientError message names the timed-out tool for debuggability."""
+        import agent_hub_sdk.session as _sess_mod
+
+        monkeypatch.setattr(_sess_mod, "_TOOL_CALL_TIMEOUT_S", 0.05)
+
+        async def _hung(*args: object, **kwargs: object) -> None:
+            await anyio.sleep(3600)
+
+        session._session.call_tool = _hung  # type: ignore[method-assign]
+
+        with pytest.raises(HubTransientError, match="get_messages"):
+            await session.get_unread()
+
+
 class TestInboxOperations:
     async def test_get_unread_parses_payload(
         self, session: HubSession

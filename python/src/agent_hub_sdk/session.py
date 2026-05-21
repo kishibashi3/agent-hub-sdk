@@ -82,6 +82,14 @@ _DEFAULT_HEARTBEAT_INTERVAL_S = 60.0
 # seconds, and we'll get a "queue overflow" warning long before silent loss.
 _INBOX_OUTPUT_CAPACITY = 1024
 
+# Per-call deadline for :meth:`HubSession._call_tool`. Prevents a server
+# that accepts the connection but never responds (e.g. under extreme load
+# or after a partial restart) from pinning the bridge indefinitely.
+# The MCP ``ClientSession`` has no built-in per-call timeout; without this
+# guard the entire inbox loop would hang on a single stuck tool call.
+# PR #8 reviewer Suggestion 2.
+_TOOL_CALL_TIMEOUT_S = 30.0
+
 # The protocol-level health-check command. ``hub.inbox(auto_pong=True)``
 # (the default) intercepts messages whose body equals this token (after
 # trimming whitespace) and replies with :data:`_PONG_REPLY` without
@@ -139,6 +147,38 @@ class HubSession:
             )
         self._status = value
 
+    async def _call_tool(
+        self,
+        name: str,
+        arguments: dict[str, object],
+    ) -> types.CallToolResult:
+        """Wrap ``ClientSession.call_tool`` with an SDK-level timeout.
+
+        Defensive guard against a server that accepts connections but hangs
+        on responses. Without this wrapper a single stuck tool call would
+        block the entire inbox loop indefinitely.
+
+        Uses :func:`anyio.move_on_after` rather than ``fail_after`` so
+        the cancel scope is explicit and the error message can carry the
+        original call's name and timeout value.
+
+        :raises HubTransientError: if the call does not complete within
+            :data:`_TOOL_CALL_TIMEOUT_S` seconds. Timeout is classified as
+            transient (the server may recover) so callers can retry through
+            the normal :meth:`send_with_retry` path or the outer reconnect
+            loop.
+
+        PR #8 reviewer Suggestion 2, codified here.
+        """
+        result: types.CallToolResult | None = None
+        with anyio.move_on_after(_TOOL_CALL_TIMEOUT_S) as scope:
+            result = await self._session.call_tool(name, arguments)
+        if scope.cancelled_caught or result is None:
+            raise HubTransientError(
+                f"tool call {name!r} timed out after {_TOOL_CALL_TIMEOUT_S}s"
+            )
+        return result
+
     @classmethod
     @asynccontextmanager
     async def open(cls, config: Config) -> AsyncIterator[HubSession]:
@@ -192,7 +232,7 @@ class HubSession:
         text (useful for logging the registered display name back).
         """
         display_name = self._config.display_name or self._config.user
-        result = await self._session.call_tool(
+        result = await self._call_tool(
             "register",
             {
                 "name": self._config.user,
@@ -216,10 +256,12 @@ class HubSession:
         :raises RuntimeError: any other error class the server returns.
         """
         try:
-            result = await self._session.call_tool(
+            result = await self._call_tool(
                 "send_message",
                 {"to": to, "message": message},
             )
+        except HubTransientError:
+            raise  # timeout / previously-classified transient — pass through as-is
         except Exception as exc:
             raise HubTransientError(
                 f"send to {to} transport failure: {exc}"
@@ -287,7 +329,7 @@ class HubSession:
         safety-net poll + heartbeat + ``/ping`` interception into a single
         ``async for msg in hub.inbox()`` loop.
         """
-        result = await self._session.call_tool("get_messages", {})
+        result = await self._call_tool("get_messages", {})
         text = raise_for_tool_error(result, op="get_messages")
         return parse_messages(text)
 
@@ -297,7 +339,7 @@ class HubSession:
         Idempotent on the server side; safe to call twice if the consumer
         loses track.
         """
-        result = await self._session.call_tool(
+        result = await self._call_tool(
             "mark_as_read", {"message_id": message_id}
         )
         # Ignore the returned text — confirmation only.
@@ -647,7 +689,9 @@ class HubSession:
         surface is deferred to a later milestone.
         """
         try:
-            result = await self._session.call_tool("get_participants", {})
+            result = await self._call_tool("get_participants", {})
+        except HubTransientError:
+            raise  # timeout / previously-classified transient — pass through as-is
         except Exception as exc:
             raise HubTransientError(
                 f"get_participants transport failure: {exc}"
