@@ -6,7 +6,10 @@ Until `v1.0.0`, breaking changes between minor versions are possible. Each relea
 
 ## [Unreleased]
 
-> Section ordering within `[Unreleased]` follows the [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) spec: `Added` → `Changed` → `Deprecated` → `Removed` → `Fixed` → `Security`. Entries within a section may be reverse-chronological.
+## [0.7.0] - 2026-05-22
+
+> M5 auto-register + M6 `/restart` built-in + inbox SSE replay dedup.
+> Lockstep Python + TypeScript. Tag commit: `79b4aa8` (PR #31 merge).
 
 ### Added — M6 `/restart` built-in command (issue #26)
 
@@ -35,6 +38,26 @@ Until `v1.0.0`, breaking changes between minor versions are possible. Each relea
 - 4 new test cases × 2 languages (= 8 total): (a) register called exactly once during connect with correct args, (b) `display_name` falls back to `user` when not supplied, (c) connect raises + MCP session closed when auto-register fails, (d) post-connect manual register passes through to server. Python tests in `tests/test_session.py::TestAgentHubConnect`; TS tests in `js/tests/session.test.ts` under the existing `AgentHub.connect` describe.
 - **Bridge cleanup is a separate follow-up**: existing bridges (`bridge-claude` / `bridge-slack` / `client-litellm` / `bridge-vscode`) all currently call `await hub.register()` explicitly at startup. Per planner GO (DM `ce8ef9ef`) these become harmless duplicates after this PR and will be removed in per-bridge follow-up PRs — same pattern as the M4 dogfood cycle (= SDK first, bridge sequential).
 - `polyglot lockstep`: Python `client.py` + TS `client.ts` change in the same PR; behavior identical across both ports.
+
+### Fixed — inbox SSE replay dedup (issue #31)
+
+- `HubSession.inbox()` now tracks `in_flight_ids` per session and silently
+  discards any `IncomingMessage` whose `id` was already seen in the same
+  session lifetime, preventing double-dispatch when the SSE push stream
+  reconnects and the server replays recent events.
+- Dedup is applied uniformly to both the push path and the poll-driven
+  safety-net path. The `anyio.Lock` that prevents concurrent poll + push
+  processing was already in place (M2); dedup builds on top of it without
+  additional synchronisation.
+- Server-side complement: `agent-hub` PR #118 adds `Last-Event-ID`-based
+  SSE replay suppression at the event-store layer. Both guards work
+  independently — the SDK dedup covers the edge cases the server guard
+  does not (e.g. in-flight messages already acknowledged before reconnect).
+- 4 new pytest cases in `tests/test_inbox_iterator.py` (`test_dedup_*`):
+  push-driven dedup, poll-driven dedup, cross-path dedup (push ID seen
+  again via poll), and dedup counter reset on session re-connect.
+- `polyglot lockstep`: Python `session.py` updated; TS `session.ts` mirrors
+  the same `inFlightIds: Set<string>` pattern (PR #32 reviewer minor fixes).
 
 ## [0.5.0] - 2026-05-20
 
