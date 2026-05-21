@@ -387,7 +387,12 @@ export class HubSession {
       const envVal = process.env[INBOX_POLL_INTERVAL_ENV];
       if (envVal !== undefined) {
         const parsed = parseFloat(envVal);
-        if (!isNaN(parsed)) return parsed * 1_000;
+        if (isNaN(parsed)) {
+          throw new Error(
+            `${INBOX_POLL_INTERVAL_ENV}=${JSON.stringify(envVal)} is not a valid number`,
+          );
+        }
+        return parsed * 1_000;
       }
       return DEFAULT_INBOX_POLL_INTERVAL_MS;
     })();
@@ -566,7 +571,7 @@ export class HubSession {
 
     // -- Consumer loop -------------------------------------------------
     try {
-      while (true) {
+      for (;;) {
         let item: QueueItem;
         if (outBuf.length > 0) {
           item = outBuf.shift()!;

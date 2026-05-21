@@ -535,6 +535,30 @@ describe("HubSession.inbox — poll interval env override", () => {
       }
     }
   }, 5_000);
+
+  it("AGENT_HUB_INBOX_POLL_INTERVAL_S with an invalid value throws (fail-fast, mirrors Python ValueError)", async () => {
+    // Python raises ``ValueError`` on an unparseable env value; the TS
+    // port must fail-fast rather than silently fall back to 30 s.
+    const envKey = "AGENT_HUB_INBOX_POLL_INTERVAL_S";
+    const origEnv = process.env[envKey];
+    process.env[envKey] = "abc"; // not a number
+
+    try {
+      const { session } = makeInboxSession({ unreadBatches: [[]] });
+      await expect(async () => {
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        for await (const _ of session.inbox({ heartbeatIntervalMs: 999_999 })) {
+          break; // never reached — the throw happens before the first yield
+        }
+      }).rejects.toThrow(/AGENT_HUB_INBOX_POLL_INTERVAL_S/);
+    } finally {
+      if (origEnv === undefined) {
+        delete process.env[envKey];
+      } else {
+        process.env[envKey] = origEnv;
+      }
+    }
+  }, 5_000);
 });
 
 // ------------------------------------------------------------------
