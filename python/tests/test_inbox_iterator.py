@@ -342,6 +342,139 @@ class TestInboxIterator:
                 await consume()
 
 
+class TestInboxDedup:
+    """``hub.inbox()`` deduplicates messages by ID within a session (issue #31)."""
+
+    async def test_sse_replay_does_not_double_yield(self) -> None:
+        """Second push while a message is in-flight must not re-yield the same ID.
+
+        Reproduces the double-dispatch bug: SSE event-store replay triggers a
+        second push before the consumer acks. ``get_messages`` still returns the
+        same unread message because ack hasn't happened yet. The dedup in
+        ``_enqueue`` must skip the second occurrence.
+        """
+        import json
+
+        # get_messages returns m1 on both the 1st and 2nd drain call
+        # (simulating "not yet acked" between the two pushes).
+        m1 = _msg("m1", "hello")
+        drain_calls = 0
+
+        push_send, push_recv = anyio.create_memory_object_stream[str](
+            max_buffer_size=10
+        )
+        config = _config()
+        mock_mcp = AsyncMock()
+
+        async def fake_call_tool(name: str, args: dict) -> types.CallToolResult:
+            nonlocal drain_calls
+            if name == "get_messages":
+                drain_calls += 1
+                # Both drain calls return the same unread message
+                return _text_result(json.dumps([m1]))
+            if name in ("mark_as_read", "send_message"):
+                return _text_result("")
+            return _text_result("")
+
+        mock_mcp.call_tool = AsyncMock(side_effect=fake_call_tool)
+        mock_mcp.subscribe_resource = AsyncMock()
+        mock_mcp.list_tools = AsyncMock(return_value=object())
+
+        session = HubSession(session=mock_mcp, config=config, notify_recv=push_recv)
+        received: list[str] = []
+
+        async def consume() -> None:
+            async with session.inbox(
+                auto_pong=False,
+                poll_interval_s=3600.0,
+                heartbeat_interval_s=3600.0,
+            ) as messages:
+                async for msg in messages:
+                    received.append(msg.id)
+                    # Simulate slow processing (ack not yet called)
+                    await anyio.sleep(0.05)
+                    # Fire second push while "processing" — same msg still unread
+                    push_send.send_nowait("inbox://@me")
+                    await anyio.sleep(0.05)
+                    break  # Consumer done; don't ack (to keep m1 "unread")
+
+        # Fire the first push shortly after inbox starts
+        async def fire_first_push() -> None:
+            await anyio.sleep(0.02)
+            push_send.send_nowait("inbox://@me")
+
+        with anyio.fail_after(3.0):
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(consume)
+                tg.start_soon(fire_first_push)
+
+        # Verify that get_messages was actually called at least twice (= the
+        # second push did fire a second drain, proving the dedup was exercised).
+        assert drain_calls >= 2, (
+            f"expected at least 2 drain calls to prove dedup was exercised, "
+            f"got {drain_calls}"
+        )
+        # m1 must appear exactly once despite two pushes returning it
+        assert received == ["m1"], f"expected ['m1'], got {received}"
+
+    async def test_different_ids_both_yielded(self) -> None:
+        """Two distinct message IDs from successive drains must both be yielded."""
+        import json
+
+        m1 = _msg("m1", "first")
+        m2 = _msg("m2", "second")
+
+        push_send, push_recv = anyio.create_memory_object_stream[str](
+            max_buffer_size=10
+        )
+        config = _config()
+        mock_mcp = AsyncMock()
+        batches = [[m1], [m2]]
+
+        async def fake_call_tool(name: str, args: dict) -> types.CallToolResult:
+            if name == "get_messages":
+                payload = batches.pop(0) if batches else []
+                return _text_result(json.dumps(payload))
+            return _text_result("")
+
+        mock_mcp.call_tool = AsyncMock(side_effect=fake_call_tool)
+        mock_mcp.subscribe_resource = AsyncMock()
+        mock_mcp.list_tools = AsyncMock(return_value=object())
+
+        session = HubSession(session=mock_mcp, config=config, notify_recv=push_recv)
+        received: list[str] = []
+
+        async def consume() -> None:
+            async with session.inbox(
+                auto_pong=False,
+                poll_interval_s=3600.0,
+                heartbeat_interval_s=3600.0,
+            ) as messages:
+                async for msg in messages:
+                    received.append(msg.id)
+                    if len(received) >= 2:
+                        break
+
+        async def fire_pushes() -> None:
+            await anyio.sleep(0.02)
+            try:
+                push_send.send_nowait("inbox://@me")
+            except anyio.BrokenResourceError:
+                return
+            await anyio.sleep(0.02)
+            try:
+                push_send.send_nowait("inbox://@me")
+            except anyio.BrokenResourceError:
+                return
+
+        with anyio.fail_after(3.0):
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(consume)
+                tg.start_soon(fire_pushes)
+
+        assert received == ["m1", "m2"]
+
+
 class TestInboxPollIntervalEnv:
     """``AGENT_HUB_INBOX_POLL_INTERVAL_S`` overrides the default poll."""
 

@@ -446,6 +446,50 @@ class HubSession:
             max_buffer_size=_INBOX_OUTPUT_CAPACITY
         )
 
+        # Track message IDs already put in the output queue within this
+        # inbox session. Prevents double-yield when an SSE event-store
+        # replay triggers a second push before the consumer acks the first
+        # delivery (= issue #31 / agent-hub double-dispatch bug).
+        #
+        # Why this is safe:
+        #   - The set grows monotonically for the lifetime of this inbox()
+        #     call (bounded by reconnect cycles). IDs of ack'd messages are
+        #     never removed, but ack'd messages don't reappear in
+        #     get_unread() so the retained IDs are harmlessly stale.
+        #     Typical bridge throughput (one message every few seconds) keeps
+        #     the set tiny; each UUID ≈ 100 bytes, negligible.
+        #   - On queue overflow (_enqueue removes the ID) the message can
+        #     re-appear on the next push/poll cycle as intended.
+        #   - The set is local to each inbox() call, so a fresh reconnect
+        #     starts with an empty set (correct: old in-flight msgs are
+        #     still unread on the server and will surface again).
+        in_flight_ids: set[str] = set()
+
+        def _enqueue(msg: IncomingMessage, source: str) -> None:
+            """Put *msg* in the output queue, deduplicating by message ID.
+
+            Skips silently if the same ID is already in-flight (= enqueued
+            but not yet ack'd by the consumer). On queue overflow, removes
+            the ID so the message can be re-fetched on the next push/poll.
+            """
+            if msg.id in in_flight_ids:
+                logger.debug(
+                    "inbox dedup: skipping already-in-flight %s (source=%s)",
+                    msg.id,
+                    source,
+                )
+                return
+            in_flight_ids.add(msg.id)
+            try:
+                send_stream.send_nowait(msg)
+            except anyio.WouldBlock:
+                # Queue full — remove so the message can re-appear on
+                # the next push/poll cycle (stays unread on the server).
+                in_flight_ids.discard(msg.id)
+                logger.warning(
+                    "inbox output queue overflow (%s), dropping", source
+                )
+
         # Resolve which drain function to use. Two paths:
         #
         # - ``commands=router`` (M2.1 new path): every drained message
@@ -475,29 +519,14 @@ class HubSession:
         # Startup drain: pick up anything queued before subscribe took
         # effect, and ack any /ping that snuck in pre-subscribe.
         for msg in await _drain():
-            try:
-                send_stream.send_nowait(msg)
-            except anyio.WouldBlock:
-                # Startup drain overflowing the consumer's queue is
-                # exotic — log and drop; the message will be re-fetched on
-                # the next push or poll cycle (it stays unread on the
-                # server until the caller acks).
-                logger.warning(
-                    "startup drain queue overflow, dropping (will reappear "
-                    "on next push/poll)"
-                )
+            _enqueue(msg, "startup")
 
         async def push_loop() -> None:
             """Drain whenever the server emits an inbox push."""
             async for _uri in self.inbox_pushes():
                 async with drain_lock:
                     for m in await _drain():
-                        try:
-                            send_stream.send_nowait(m)
-                        except anyio.WouldBlock:
-                            logger.warning(
-                                "inbox output queue overflow (push), dropping"
-                            )
+                        _enqueue(m, "push")
 
         async def poll_loop() -> None:
             """Drain every ``resolved_poll`` seconds as a safety net."""
@@ -505,12 +534,7 @@ class HubSession:
                 await anyio.sleep(resolved_poll)
                 async with drain_lock:
                     for m in await _drain():
-                        try:
-                            send_stream.send_nowait(m)
-                        except anyio.WouldBlock:
-                            logger.warning(
-                                "inbox output queue overflow (poll), dropping"
-                            )
+                        _enqueue(m, "poll")
 
         async def heartbeat_loop() -> None:
             """Periodic liveness probe; raises out if the session is dead."""
