@@ -408,6 +408,12 @@ class TestInboxDedup:
                 tg.start_soon(consume)
                 tg.start_soon(fire_first_push)
 
+        # Verify that get_messages was actually called at least twice (= the
+        # second push did fire a second drain, proving the dedup was exercised).
+        assert drain_calls >= 2, (
+            f"expected at least 2 drain calls to prove dedup was exercised, "
+            f"got {drain_calls}"
+        )
         # m1 must appear exactly once despite two pushes returning it
         assert received == ["m1"], f"expected ['m1'], got {received}"
 

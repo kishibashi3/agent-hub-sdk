@@ -452,8 +452,12 @@ class HubSession:
         # delivery (= issue #31 / agent-hub double-dispatch bug).
         #
         # Why this is safe:
-        #   - ack'd messages never reappear in get_unread(), so the set only
-        #     accumulates IDs for messages currently being processed.
+        #   - The set grows monotonically for the lifetime of this inbox()
+        #     call (bounded by reconnect cycles). IDs of ack'd messages are
+        #     never removed, but ack'd messages don't reappear in
+        #     get_unread() so the retained IDs are harmlessly stale.
+        #     Typical bridge throughput (one message every few seconds) keeps
+        #     the set tiny; each UUID ≈ 100 bytes, negligible.
         #   - On queue overflow (_enqueue removes the ID) the message can
         #     re-appear on the next push/poll cycle as intended.
         #   - The set is local to each inbox() call, so a fresh reconnect
