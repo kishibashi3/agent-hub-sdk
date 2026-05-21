@@ -6,6 +6,16 @@ Until `v1.0.0`, breaking changes between minor versions are possible. Each relea
 
 ## [Unreleased]
 
+### Added — TypeScript port of `hub.inbox()` + `hub.oneShot()` (issue #20)
+
+- **`HubSession.inbox(options?)`** async generator (TypeScript, M2 port): mirrors Python's `HubSession.inbox()` 1:1. Merges three concurrent producers (SSE push via `inboxPushes`, safety-net poll, liveness heartbeat) into a single `for await` loop. Options: `autoPong` (default `true` — intercept `/ping`, send `pong`, ack, drop), `pollIntervalMs` (default 30 000ms; overridable via `AGENT_HUB_INBOX_POLL_INTERVAL_S` env), `heartbeatIntervalMs` (default 60 000ms), `commands` (`CommandRouter | null`). Cancellation via `AbortController` — all three producers stop cleanly when the consumer `break`s or throws. In-flight dedup via `inFlightIds: Set<string>` prevents SSE replay double-yield (mirrors Python issue #31 fix). Private helpers `_drainInterceptingPing(autoPong)` and `_drainWithRouter(router)` mirror Python's `_drain_intercepting_ping` / `_drain_with_router`.
+- **`HubSession.oneShot()`** (TypeScript, M3 port): mirrors Python's `HubSession.one_shot()`. Opens a fresh MCP session via the stored `_factory` (set by `HubSession.open` / `AgentHub.connect`) and returns a `HubSessionHandle` for `await using`. The inner session shares the immutable `Config` but has its own `McpClient`, push queue, and `status` (starts at `"idle"`). Throws if no factory is available (= session constructed directly, bypassing `AgentHub.connect`).
+- 25 new vitest cases across 2 new test files:
+  - `js/tests/oneShot.test.ts` (10 tests): no-factory error path, lifecycle (distinct handle, config passthrough, `Symbol.asyncDispose` on normal + exceptional exit), independence (status, client, push-queue isolation), nested inside `AgentHub.connect`, fail-fast preservation.
+  - `js/tests/inbox.test.ts` (15 tests): `_drainInterceptingPing` direct tests (autoPong false/true, whitespace, suffix non-match, send-failure resilience), `inbox()` producer paths (startup drain, push, poll), autoPong default/opt-out, heartbeat periodicity, heartbeat-failure propagation, SSE replay dedup (issue #31), distinct-ID both-yield, `AGENT_HUB_INBOX_POLL_INTERVAL_S` env override.
+- Total test count: 144 (up from 119).
+- `polyglot lockstep`: TypeScript `session.ts` catches up to Python `session.py` M2/M3 feature parity.
+
 ## [0.7.0] - 2026-05-22
 
 > M5 auto-register + M6 `/restart` built-in + inbox SSE replay dedup.

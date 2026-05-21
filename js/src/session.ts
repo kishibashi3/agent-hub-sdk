@@ -1,5 +1,5 @@
 // MCP session lifecycle for the ``stateful`` mode. Mirrors Python's
-// ``agent_hub_sdk/session.py``.
+// ``agent_hub_sdk/session.py`` (M2 inbox iterator + M3 oneShot).
 //
 // ``HubSession`` owns one MCP client over streamable HTTP plus a queue
 // of inbox-push URIs. It's the layer that talks the MCP protocol;
@@ -105,6 +105,12 @@ export class HubSession {
   private readonly _pushWaiters: Array<(uri: string) => void> = [];
   /** Closed flag — once true, ``inboxPushes`` returns done. */
   private _closed = false;
+  /**
+   * Factory stored by ``HubSession.open`` so ``oneShot()`` can open a
+   * sibling session using the same transport. Undefined when the session
+   * was constructed directly (e.g. in tests that bypass ``open``).
+   */
+  _factory?: McpClientFactory;
 
   constructor(
     /** Underlying MCP client (= mock or real). */
@@ -135,6 +141,7 @@ export class HubSession {
     const client = await factory(config);
     await client.initialize();
     const session = new HubSession(client, config);
+    session._factory = factory; // Stored so oneShot() can open a sibling session.
     return {
       session,
       async [Symbol.asyncDispose]() {
@@ -156,6 +163,50 @@ export class HubSession {
       );
     }
     this.status = value;
+  }
+
+  // ------------------------------------------------------------------
+  // One-shot session (M3) — fresh MCP session for one batch of ops
+  // ------------------------------------------------------------------
+
+  /**
+   * Open a fresh ``HubSession`` for one batch of tool calls.
+   *
+   * Returns a new ``HubSessionHandle`` whose ``session`` is bound to its
+   * own independent MCP transport and client. The outer session (``this``)
+   * is not touched — its long-lived SSE subscribe, push queue, and
+   * ``status`` are preserved.
+   *
+   * Use ``await using`` to guarantee cleanup:
+   *
+   * ```ts
+   * await using inner = await hub.session.oneShot();
+   * for (const msg of await inner.session.getUnread()) {
+   *   await inner.session.send(msg.sender, await llm(msg.body));
+   *   await inner.session.ack(msg.id);
+   * }
+   * // inner scope exits → fresh session closed.
+   * ```
+   *
+   * **Independence**: the returned session has its own MCP client,
+   * push queue, and status (starts at ``"idle"``). Only the immutable
+   * ``Config`` (URL, PAT, tenant, user, mode) is shared.
+   *
+   * **Mode-agnostic**: available on any session regardless of ``mode``.
+   *
+   * Mirrors Python's ``HubSession.one_shot()`` (M3).
+   *
+   * @throws Error if the session was not opened via ``HubSession.open``
+   *   (= no factory available).
+   */
+  async oneShot(): Promise<HubSessionHandle> {
+    if (this._factory === undefined) {
+      throw new Error(
+        "HubSession.oneShot: no factory available — session was not " +
+          "opened via HubSession.open (= AgentHub.connect).",
+      );
+    }
+    return HubSession.open(this.config, this._factory);
   }
 
   // ------------------------------------------------------------------
@@ -286,6 +337,322 @@ export class HubSession {
 
   async heartbeat(): Promise<void> {
     await this.client.listTools();
+  }
+
+  // ------------------------------------------------------------------
+  // Inbox iterator (M2) — push + poll + heartbeat + command routing
+  // ------------------------------------------------------------------
+
+  /**
+   * Async generator over inbox messages. Merges three concurrent
+   * producers into a single ``for await`` loop:
+   *
+   * 1. **SSE push** — low-latency path; drains on every server
+   *    notification.
+   * 2. **Safety-net poll** — drains every ``pollIntervalMs`` ms
+   *    (default 30s, override via ``AGENT_HUB_INBOX_POLL_INTERVAL_S``
+   *    env or ``options.pollIntervalMs``) in case the SSE stream goes
+   *    silent.
+   * 3. **Heartbeat** — calls ``listTools`` every
+   *    ``heartbeatIntervalMs`` ms (default 60s) as a liveness probe.
+   *    A dead session surfaces as a thrown error to the caller's
+   *    reconnect loop.
+   *
+   * Commands (``/ping``, ``/status``, etc.) are intercepted before
+   * reaching the consumer. Pass a ``CommandRouter`` via
+   * ``options.commands`` for full command dispatch; leave it unset to
+   * use the legacy ``autoPong`` mode (default ``true`` = intercept
+   * ``/ping`` only).
+   *
+   * In-flight dedup: each message ID is tracked for the lifetime of
+   * the iterator so SSE replay double-pushes never double-yield the
+   * same message (mirrors Python issue #31 fix).
+   *
+   * Usage:
+   * ```ts
+   * for await (const msg of hub.session.inbox({ commands: router })) {
+   *   await processMessage(msg);
+   *   await hub.session.ack(msg.id);
+   * }
+   * ```
+   *
+   * Mirrors Python's ``HubSession.inbox()`` (M2).
+   */
+  async *inbox(
+    options: InboxOptions = {},
+  ): AsyncGenerator<IncomingMessage, void, void> {
+    // -- Resolve options -----------------------------------------------
+    const resolvedPollMs: number = (() => {
+      if (options.pollIntervalMs != null) return options.pollIntervalMs;
+      const envVal = process.env[INBOX_POLL_INTERVAL_ENV];
+      if (envVal !== undefined) {
+        const parsed = parseFloat(envVal);
+        if (isNaN(parsed)) {
+          throw new Error(
+            `${INBOX_POLL_INTERVAL_ENV}=${JSON.stringify(envVal)} is not a valid number`,
+          );
+        }
+        return parsed * 1_000;
+      }
+      return DEFAULT_INBOX_POLL_INTERVAL_MS;
+    })();
+    const heartbeatMs =
+      options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
+    const autoPong = options.autoPong ?? true;
+    const commandRouter = options.commands ?? null;
+
+    // Resolve the drain function once.
+    const drain =
+      commandRouter !== null
+        ? (): Promise<IncomingMessage[]> =>
+            this._drainWithRouter(commandRouter)
+        : (): Promise<IncomingMessage[]> =>
+            this._drainInterceptingPing(autoPong);
+
+    // -- Output channel ------------------------------------------------
+    // In-flight dedup: prevent SSE replay from double-yielding the same
+    // message (mirrors Python's ``in_flight_ids`` set, issue #31).
+    const inFlightIds = new Set<string>();
+
+    type QueueItem =
+      | { kind: "msg"; msg: IncomingMessage }
+      | { kind: "error"; err: unknown };
+
+    const outBuf: QueueItem[] = [];
+    let outResolve: ((item: QueueItem) => void) | undefined;
+
+    function emit(item: QueueItem): void {
+      if (outResolve !== undefined) {
+        const r = outResolve;
+        outResolve = undefined;
+        r(item);
+      } else {
+        outBuf.push(item);
+      }
+    }
+
+    function enqueue(msg: IncomingMessage, source: string): void {
+      if (inFlightIds.has(msg.id)) {
+        return; // Already in-flight — dedup.
+      }
+      inFlightIds.add(msg.id);
+      // Overflow guard: don't grow the buffer past capacity.
+      const msgCount = outBuf.filter((i) => i.kind === "msg").length;
+      if (msgCount >= INBOX_OUTPUT_CAPACITY) {
+        inFlightIds.delete(msg.id);
+        console.warn(`inbox output queue overflow (${source}), dropping`);
+        return;
+      }
+      emit({ kind: "msg", msg });
+    }
+
+    function signalError(err: unknown): void {
+      emit({ kind: "error", err });
+    }
+
+    // -- Cancellation --------------------------------------------------
+    // AbortController: abort() is called when the consumer exits the
+    // iterator (break / return / throw). All producer loops check the
+    // signal and exit cleanly.
+    const abort = new AbortController();
+    const sig = abort.signal;
+
+    /** Sleep for ``ms`` ms, resolve false immediately if aborted. */
+    const sleepOrAbort = (ms: number): Promise<boolean> => {
+      return new Promise<boolean>((resolve) => {
+        if (sig.aborted) {
+          resolve(false);
+          return;
+        }
+        const t = setTimeout(() => resolve(true), ms);
+        sig.addEventListener(
+          "abort",
+          () => {
+            clearTimeout(t);
+            resolve(false);
+          },
+          { once: true },
+        );
+      });
+    };
+
+    /**
+     * Wait for the next inbox push URI, or ``null`` if aborted /
+     * session closed. Uses the same ``_pushWaiters`` mechanism as
+     * ``inboxPushes()``, but with an abort escape hatch.
+     */
+    const waitForPush = (): Promise<string | null> => {
+      return new Promise<string | null>((resolve) => {
+        if (sig.aborted || this._closed) {
+          resolve(null);
+          return;
+        }
+        // Drain already-buffered push (notification arrived before we
+        // started waiting).
+        if (this._pushQueue.length > 0) {
+          resolve(this._pushQueue.shift()!);
+          return;
+        }
+        let settled = false;
+        const onPush = (uri: string): void => {
+          if (settled) return;
+          settled = true;
+          resolve(uri === "" ? null : uri); // "" = session closed signal
+        };
+        this._pushWaiters.push(onPush);
+        sig.addEventListener(
+          "abort",
+          () => {
+            if (settled) return;
+            settled = true;
+            // Remove our resolver so _enqueuePush doesn't call it later.
+            const idx = this._pushWaiters.indexOf(onPush);
+            if (idx !== -1) this._pushWaiters.splice(idx, 1);
+            resolve(null);
+          },
+          { once: true },
+        );
+      });
+    };
+
+    // -- Startup -------------------------------------------------------
+    await this.subscribeInbox();
+
+    // Pick up anything that arrived before the subscription took effect.
+    for (const msg of await drain()) {
+      enqueue(msg, "startup");
+    }
+
+    // -- Producers -----------------------------------------------------
+    const pushLoop = async (): Promise<void> => {
+      for (;;) {
+        const uri = await waitForPush();
+        if (uri === null) return;
+        try {
+          for (const msg of await drain()) enqueue(msg, "push");
+        } catch (err) {
+          signalError(err);
+          return;
+        }
+      }
+    };
+
+    const pollLoop = async (): Promise<void> => {
+      for (;;) {
+        const ok = await sleepOrAbort(resolvedPollMs);
+        if (!ok) return;
+        try {
+          for (const msg of await drain()) enqueue(msg, "poll");
+        } catch (err) {
+          signalError(err);
+          return;
+        }
+      }
+    };
+
+    const heartbeatLoop = async (): Promise<void> => {
+      for (;;) {
+        const ok = await sleepOrAbort(heartbeatMs);
+        if (!ok) return;
+        try {
+          await this.heartbeat();
+        } catch (err) {
+          signalError(err);
+          return;
+        }
+      }
+    };
+
+    const allDone = Promise.allSettled([
+      pushLoop(),
+      pollLoop(),
+      heartbeatLoop(),
+    ]);
+
+    // -- Consumer loop -------------------------------------------------
+    try {
+      for (;;) {
+        let item: QueueItem;
+        if (outBuf.length > 0) {
+          item = outBuf.shift()!;
+        } else {
+          item = await new Promise<QueueItem>((resolve) => {
+            outResolve = resolve;
+          });
+        }
+        if (item.kind === "error") throw item.err;
+        yield item.msg;
+      }
+    } finally {
+      // Consumer exited (break / return / thrown error). Signal all
+      // producers to stop, then wait for them to drain.
+      abort.abort();
+      await allDone;
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // Private drain helpers
+  // ------------------------------------------------------------------
+
+  /**
+   * Fetch unread messages and intercept ``/ping`` when ``autoPong`` is
+   * true. Mirrors Python's ``_drain_intercepting_ping``.
+   */
+  private async _drainInterceptingPing(
+    autoPong: boolean,
+  ): Promise<IncomingMessage[]> {
+    const messages = await this.getUnread();
+    if (!autoPong) return messages;
+    const remaining: IncomingMessage[] = [];
+    for (const msg of messages) {
+      if (msg.body.trim() !== PING_TOKEN) {
+        remaining.push(msg);
+        continue;
+      }
+      console.info(`[ping] from=${msg.sender} → pong`);
+      try {
+        await this.send(msg.sender, PING_REPLY);
+      } catch (e) {
+        console.error(`auto-pong send to ${msg.sender} failed:`, e);
+      }
+      try {
+        await this.ack(msg.id);
+      } catch (e) {
+        console.error(`auto-pong ack for ${msg.id} failed:`, e);
+      }
+    }
+    return remaining;
+  }
+
+  /**
+   * Fetch unread messages and route each through ``router``. Messages
+   * where ``dispatch`` returns ``"yield"`` are returned to the consumer;
+   * ``"handled"`` messages (already replied + acked by the router) are
+   * dropped. Mirrors Python's ``_drain_with_router``.
+   */
+  private async _drainWithRouter(
+    router: CommandRouter,
+  ): Promise<IncomingMessage[]> {
+    const messages = await this.getUnread();
+    const yielded: IncomingMessage[] = [];
+    for (const msg of messages) {
+      let result: Awaited<ReturnType<CommandRouter["dispatch"]>>;
+      try {
+        result = await router.dispatch(msg, this);
+      } catch (err) {
+        // Router.dispatch is supposed to catch handler errors internally.
+        // If something escapes, log and yield so the consumer sees it.
+        console.error(
+          `command router crashed on message ${msg.id}; yielding to consumer`,
+          err,
+        );
+        yielded.push(msg);
+        continue;
+      }
+      if (result === "yield") yielded.push(msg);
+    }
+    return yielded;
   }
 
   // ------------------------------------------------------------------
