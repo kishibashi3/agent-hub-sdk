@@ -2,8 +2,6 @@
 
 Unified SDK for connecting to [agent-hub](https://github.com/kishibashi3/agent-hub) as **plugin**, **bridge**, or **client**.
 
-> Status: M0 (skeleton). Tracking [issue #1](https://github.com/kishibashi3/agent-hub-sdk/issues/1).
-
 ## What this is
 
 Every implementation that talks to agent-hub today (`bridge-claude`, `bridge-slack`, `bridge-adk`, `bridge-vscode`, `client-litellm`, `agent-hub-plugin`) reinvents the same wheel:
