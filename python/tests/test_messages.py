@@ -40,6 +40,58 @@ class TestParseMessages:
             timestamp="2026-05-19T10:00:00Z",
         )
 
+    def test_parses_caused_by_when_present(self) -> None:
+        """v10: caused_by フィールドが存在する場合は IncomingMessage に含まれる (issue #37)."""
+        payload = json.dumps(
+            [
+                {
+                    "id": "reply-id",
+                    "from": "@alice",
+                    "to": "@me",
+                    "message": "got it",
+                    "timestamp": "2026-05-30T00:00:01Z",
+                    "caused_by": "root-id",
+                },
+            ]
+        )
+        result = parse_messages(payload)
+        assert len(result) == 1
+        assert result[0].caused_by == "root-id"
+
+    def test_caused_by_defaults_to_none_when_absent(self) -> None:
+        """v10: caused_by フィールドがない (pre-v10 サーバー / root メッセージ) は None (issue #37)."""
+        payload = json.dumps(
+            [
+                {
+                    "id": "msg-1",
+                    "from": "@alice",
+                    "to": "@me",
+                    "message": "hello",
+                    "timestamp": "2026-05-30T00:00:00Z",
+                },
+            ]
+        )
+        result = parse_messages(payload)
+        assert result[0].caused_by is None
+
+    def test_caused_by_non_string_treated_as_none(self) -> None:
+        """caused_by が文字列でない場合 (null / 数値 / bool) は None に正規化する (issue #37)."""
+        for bad_value in [None, 42, True, [], {}]:
+            payload = json.dumps(
+                [
+                    {
+                        "id": "msg-1",
+                        "from": "@alice",
+                        "to": "@me",
+                        "message": "x",
+                        "timestamp": "2026-05-30T00:00:00Z",
+                        "caused_by": bad_value,
+                    },
+                ]
+            )
+            result = parse_messages(payload)
+            assert result[0].caused_by is None, f"caused_by={bad_value!r} should map to None"
+
     def test_skips_malformed_entries(self) -> None:
         # One good, one with missing key, one with non-dict shape.
         payload = json.dumps(

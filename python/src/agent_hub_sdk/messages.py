@@ -39,6 +39,11 @@ class IncomingMessage:
         broadcasts). Useful when the consumer is multiplexing roles.
     :param body: the human-readable message body.
     :param timestamp: ISO-8601 UTC timestamp string from the server.
+    :param caused_by: v10 — ID of the message that directly triggered this
+        one, or ``None`` if this is a chain root (spontaneous message, new
+        task start, etc.). Pass as ``caused_by=msg.id`` to
+        :meth:`~agent_hub_sdk.session.HubSession.send` to continue the chain.
+        See issue #162 for design rationale.
     """
 
     id: str
@@ -46,6 +51,7 @@ class IncomingMessage:
     to: str
     body: str
     timestamp: str
+    caused_by: str | None = None  # v10: causal chain tracking (issue #162)
 
 
 @dataclass(frozen=True)
@@ -84,6 +90,7 @@ def parse_messages(text: str) -> list[IncomingMessage]:
         # Required keys; if any are missing or non-string, skip the entry
         # rather than crash the whole batch (= defensive against schema drift).
         try:
+            caused_by_raw = row.get("caused_by")
             result.append(
                 IncomingMessage(
                     id=row["id"],
@@ -91,6 +98,8 @@ def parse_messages(text: str) -> list[IncomingMessage]:
                     to=row["to"],
                     body=row["message"],
                     timestamp=row["timestamp"],
+                    # v10: caused_by is optional; None on pre-v10 servers or root messages
+                    caused_by=caused_by_raw if isinstance(caused_by_raw, str) else None,
                 )
             )
         except (KeyError, TypeError):

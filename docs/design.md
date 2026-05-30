@@ -14,7 +14,7 @@ Every implementation that connects to [agent-hub](https://github.com/kishibashi3
 | `agent-hub-client-litellm/src/client/{main,watcher}.py` | Per-message session open/close (stateless) |
 | `agent-hub-bridge-vscode/src/protocol.ts` | TS `AgentHubClient` + auth (`trust` / `pat` / `pat+override`) + backoff |
 | `agent-hub-bridge-vscode/src/agentHub.ts` | TS `InboxWatcher` — SSE long-lived stream + exponential backoff (3→6→12→…→60s) |
-| `kishibashi3-plugins-claude/.../scripts/watch.sh` | bash SSE watcher (plugin-mode sidecar) |
+| `agent-hub-plugins-claude/.../scripts/watch.sh` | bash SSE watcher (plugin-mode sidecar) |
 
 The Slack bridge's `hub.py` is the most mature Python implementation; the VS Code bridge's `protocol.ts` is the most mature TS implementation. They are the starting points for the SDK extraction.
 
@@ -206,7 +206,7 @@ Each milestone has the same completion criteria: **one downstream consumer is mi
 | **M2 — Python inbox** | `hub.inbox()` unified iterator (push + poll + heartbeat + reconnect). Moves `bridge-claude/worker.py` task-group logic into the SDK. | `bridge-claude` |
 | **M3 — Python stateless** | `mode="stateless"` + `one_shot()`. | `client-litellm` |
 | **M4 — TypeScript core + inbox** | `js/` port of M1+M2. Extracted from `bridge-vscode/{protocol,agentHub}.ts`. | `bridge-vscode` |
-| **M5 — plugin (`global` mode)** | Python sidecar replacing `kishibashi3-plugins-claude/.../watch.sh`. | `agent-hub-plugin` |
+| **M5 — plugin (`global` mode)** | Python sidecar replacing `agent-hub-plugins-claude/.../watch.sh`. | `agent-hub-plugin` |
 | **M6 — polish** | v0.1.0 tag, CHANGELOG, per-milestone migration docs finalised. | — |
 
 ## 8. Non-goals (for v0.x)
