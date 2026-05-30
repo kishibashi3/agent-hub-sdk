@@ -246,20 +246,32 @@ class HubSession:
     # Send
     # ------------------------------------------------------------------
 
-    async def send(self, to: str, message: str) -> str:
+    async def send(
+        self,
+        to: str,
+        message: str,
+        *,
+        caused_by: str | None = None,
+    ) -> str:
         """Send a message to a peer or team.
 
         :param to: recipient handle (``@peer`` or ``@team``).
         :param message: body text.
+        :param caused_by: v10 — ID of the message that triggered this send.
+            Opt-in: pass ``caused_by=incoming_msg.id`` to link this reply to
+            its cause in the causal chain. Omit (or pass ``None``) for
+            spontaneous messages / new task starts. No auto-propagation —
+            incorrect causal links are more harmful than missing ones.
+            See issue #162 for design rationale.
         :raises PeerNotFoundError: recipient not registered / offline.
         :raises HubTransientError: 5xx / network / timeout.
         :raises RuntimeError: any other error class the server returns.
         """
+        args: dict[str, object] = {"to": to, "message": message}
+        if caused_by is not None:
+            args["caused_by"] = caused_by
         try:
-            result = await self._call_tool(
-                "send_message",
-                {"to": to, "message": message},
-            )
+            result = await self._call_tool("send_message", args)
         except HubTransientError:
             raise  # timeout / previously-classified transient — pass through as-is
         except Exception as exc:
@@ -274,6 +286,7 @@ class HubSession:
         to: str,
         message: str,
         *,
+        caused_by: str | None = None,
         max_attempts: int = 3,
         base_delay_s: float = 1.0,
         sleep_fn: Callable[[float], Awaitable[None]] | None = None,
@@ -286,6 +299,8 @@ class HubSession:
         end-user waiting; the consumer is expected to surface a "hub
         temporarily unavailable" notice when the retry budget is exhausted.
 
+        :param caused_by: v10 — forwarded to :meth:`send` on each attempt.
+            See :meth:`send` for full semantics.
         :param max_attempts: total attempts (≥ 1).
         :param base_delay_s: first sleep; subsequent sleeps double each time.
         :param sleep_fn: injected sleep for tests; defaults to
@@ -299,7 +314,7 @@ class HubSession:
         last_transient: HubTransientError | None = None
         for attempt in range(max_attempts):
             try:
-                return await self.send(to, message)
+                return await self.send(to, message, caused_by=caused_by)
             except HubTransientError as exc:
                 last_transient = exc
                 if attempt >= max_attempts - 1:

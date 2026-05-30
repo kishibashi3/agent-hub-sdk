@@ -113,6 +113,27 @@ class TestSend:
         with pytest.raises(HubTransientError, match="transport failure"):
             await session.send("@peer", "hi")
 
+    async def test_send_with_caused_by_includes_field(
+        self, session: HubSession
+    ) -> None:
+        """caused_by を指定すると call_tool の args に含まれる (issue #37 / agent-hub#162)."""
+        session._session.call_tool = AsyncMock(return_value=_text_result("delivered"))
+        await session.send("@peer", "reply", caused_by="root-msg-id")
+        session._session.call_tool.assert_awaited_once_with(
+            "send_message",
+            {"to": "@peer", "message": "reply", "caused_by": "root-msg-id"},
+        )
+
+    async def test_send_without_caused_by_omits_field(
+        self, session: HubSession
+    ) -> None:
+        """caused_by 省略 / None のとき args に caused_by キーが含まれない (backward compat)."""
+        session._session.call_tool = AsyncMock(return_value=_text_result("delivered"))
+        await session.send("@peer", "hello")
+        session._session.call_tool.assert_awaited_once_with(
+            "send_message", {"to": "@peer", "message": "hello"}
+        )
+
 
 class TestSendWithRetry:
     async def test_succeeds_on_first_try(self, session: HubSession) -> None:
@@ -204,6 +225,17 @@ class TestSendWithRetry:
             )
         assert session._session.call_tool.await_count == 1
         assert slept == []
+
+    async def test_send_with_retry_passes_caused_by_to_send(
+        self, session: HubSession
+    ) -> None:
+        """send_with_retry が caused_by を send() に転送すること (issue #37 / agent-hub#162)."""
+        session._session.call_tool = AsyncMock(return_value=_text_result("delivered"))
+        await session.send_with_retry("@peer", "reply", caused_by="root-msg-id")
+        session._session.call_tool.assert_awaited_once_with(
+            "send_message",
+            {"to": "@peer", "message": "reply", "caused_by": "root-msg-id"},
+        )
 
 
 class TestCallToolTimeout:
