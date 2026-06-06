@@ -13,7 +13,10 @@ go get github.com/kishibashi3/agent-hub-sdk/go@latest
 ```go
 import agenthub "github.com/kishibashi3/agent-hub-sdk/go"
 
-client := agenthub.New(endpoint, pat, userID, tenantID)
+client, err := agenthub.New(endpoint, pat, userID, tenantID)
+if err != nil {
+    log.Fatal(err)
+}
 if err := client.Initialize(ctx); err != nil {
     log.Fatal(err)
 }
