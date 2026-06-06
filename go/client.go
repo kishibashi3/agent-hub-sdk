@@ -31,13 +31,20 @@ const (
 //
 // SSE 対応: tools/call の応答は JSON または text/event-stream のどちらも受け取る。
 // SSE inbox push は未実装 — ポーリング (GetMessages) で代替する (MVP)。
+//
+// # Concurrency
+//
+// Client は単一 goroutine からの順次呼び出しを前提とする。
+// sessionID フィールドは sync なしで読み書きされるため、複数 goroutine から
+// 並列に呼び出すと data race になる。bridge は 1 メッセージを逐次処理する
+// 設計なので問題ないが、並列化が必要な場合は呼び出し側で sync.Mutex を使うこと。
 type Client struct {
 	endpoint   string
 	pat        string
 	userID     string
 	tenantID   string
 	clientName string
-	sessionID  string
+	sessionID  string   // single-goroutine 前提; 並列アクセス不可
 	reqIDSeq   atomic.Int64
 	httpClient *http.Client
 }
@@ -58,7 +65,19 @@ func WithHTTPTimeout(d time.Duration) ClientOption {
 }
 
 // New は新しい Client を生成する。Initialize() を呼ぶまで tools/call はできない。
-func New(endpoint, pat, userID, tenantID string, opts ...ClientOption) *Client {
+//
+// endpoint・pat・userID は必須パラメータ。空文字列を渡すとエラーを返す (fail-fast)。
+// tenantID は省略可能 (空文字列 = default tenant)。
+func New(endpoint, pat, userID, tenantID string, opts ...ClientOption) (*Client, error) {
+	if endpoint == "" {
+		return nil, fmt.Errorf("agenthub.New: endpoint is required")
+	}
+	if pat == "" {
+		return nil, fmt.Errorf("agenthub.New: pat is required")
+	}
+	if userID == "" {
+		return nil, fmt.Errorf("agenthub.New: userID is required")
+	}
 	c := &Client{
 		endpoint:   endpoint,
 		pat:        pat,
@@ -70,7 +89,7 @@ func New(endpoint, pat, userID, tenantID string, opts ...ClientOption) *Client {
 	for _, o := range opts {
 		o(c)
 	}
-	return c
+	return c, nil
 }
 
 // ──────────────────────────────────────────────────────────────────────── //
@@ -203,6 +222,9 @@ func (c *Client) callToolText(ctx context.Context, name string, args map[string]
 	}
 	if rpc.Error != nil {
 		return "", fmt.Errorf("rpc error %d: %s", rpc.Error.Code, rpc.Error.Message)
+	}
+	if len(rpc.Result) == 0 {
+		return "", fmt.Errorf("rpc result is null for tool %q (no result field in response)", name)
 	}
 	var result toolResult
 	if err := json.Unmarshal(rpc.Result, &result); err != nil {
