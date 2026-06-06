@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -28,16 +29,23 @@ const (
 // 実装している MCP 操作:
 //   - initialize + notifications/initialized (セッション確立)
 //   - tools/call: register / get_messages / mark_as_read / send_message
+//   - GET /mcp SSE ストリーム: サーバー ping に自動応答 (issue #41)
 //
-// SSE 対応: tools/call の応答は JSON または text/event-stream のどちらも受け取る。
-// SSE inbox push は未実装 — ポーリング (GetMessages) で代替する (MVP)。
+// SSE 対応:
+//   - tools/call の応答は JSON または text/event-stream のどちらも受け取る。
+//   - StartSSE() で GET /mcp の long-lived connection を開き ping に応答する。
 //
 // # Concurrency
 //
-// Client は単一 goroutine からの順次呼び出しを前提とする。
+// postRPC / tools/call は単一 goroutine からの順次呼び出しを前提とする。
 // sessionID フィールドは sync なしで読み書きされるため、複数 goroutine から
 // 並列に呼び出すと data race になる。bridge は 1 メッセージを逐次処理する
 // 設計なので問題ないが、並列化が必要な場合は呼び出し側で sync.Mutex を使うこと。
+//
+// SSE goroutine (StartSSE が起動する) は sessionID を初期化時のスナップショットで
+// 保持するため、main goroutine の sessionID アクセスと競合しない。
+// sendPong は sseClient (Timeout=0 専用クライアント) を使い、
+// main goroutine の httpClient 呼び出しと独立して並列動作する。
 type Client struct {
 	endpoint   string
 	pat        string
@@ -47,6 +55,11 @@ type Client struct {
 	sessionID  string   // single-goroutine 前提; 並列アクセス不可
 	reqIDSeq   atomic.Int64
 	httpClient *http.Client
+	// sseClient は SSE ストリーム (GET /mcp) 専用クライアント (Timeout=0 = long-lived)。
+	sseClient *http.Client
+	sseMu     sync.Mutex // sseCancel / sseDone を保護する
+	sseCancel context.CancelFunc
+	sseDone   <-chan struct{}
 }
 
 // ClientOption は Client の追加設定を行うオプション関数。
@@ -85,6 +98,7 @@ func New(endpoint, pat, userID, tenantID string, opts ...ClientOption) (*Client,
 		tenantID:   tenantID,
 		clientName: defaultClientName,
 		httpClient: &http.Client{Timeout: 90 * time.Second},
+		sseClient:  &http.Client{Timeout: 0}, // long-lived SSE 接続 — タイムアウト無効
 	}
 	for _, o := range opts {
 		o(c)
@@ -98,7 +112,9 @@ func New(endpoint, pat, userID, tenantID string, opts ...ClientOption) (*Client,
 
 // Initialize は MCP initialize ハンドシェイクを行い、sessionID を確立する。
 // initialize → notifications/initialized の順で送信する (MCP 仕様)。
+// 再接続時に古い sessionID が残っていると HTTP 400 になるため、先頭でクリアする。
 func (c *Client) Initialize(ctx context.Context) error {
+	c.sessionID = "" // stale session ID をクリア (issue #41)
 	params := map[string]any{
 		"protocolVersion": mcpProtocolVersion,
 		"capabilities":    map[string]any{},
@@ -301,6 +317,191 @@ func (c *Client) postRPC(ctx context.Context, method string, params any, isNotif
 	}
 	return io.ReadAll(resp.Body)
 }
+
+// ──────────────────────────────────────────────────────────────────────── //
+// SSE ストリーム (GET /mcp) — ping 自動応答                               //
+// ──────────────────────────────────────────────────────────────────────── //
+
+// pingMessage は SSE ストリーム経由で受信する JSON-RPC ping リクエスト。
+// ID は int または string のどちらでもよく、pong でそのままエコーバックする。
+type pingMessage struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id"`
+	Method  string          `json:"method"`
+}
+
+// StartSSE は GET /mcp SSE ストリームを開き、ping に自動応答する
+// バックグラウンド goroutine を起動する (issue #41)。
+//
+// Initialize() を呼び出した後に呼ぶこと (sessionID が設定されている必要がある)。
+// 既に SSE goroutine が起動中の場合は StopSSE() を先に呼ぶこと。
+// ctx がキャンセルされると goroutine も終了する (StopSSE でも停止可)。
+func (c *Client) StartSSE(ctx context.Context) error {
+	sid := c.sessionID
+	if sid == "" {
+		return fmt.Errorf("StartSSE: sessionID is empty; call Initialize() first")
+	}
+
+	sseCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+
+	c.sseMu.Lock()
+	c.sseCancel = cancel
+	c.sseDone = done
+	c.sseMu.Unlock()
+
+	go c.handleSSEStream(sseCtx, sid, done)
+	return nil
+}
+
+// StopSSE は SSE goroutine をキャンセルして終了を待つ。
+// StartSSE が呼ばれていない場合は no-op。
+func (c *Client) StopSSE() {
+	c.sseMu.Lock()
+	cancel := c.sseCancel
+	done := c.sseDone
+	c.sseCancel = nil
+	c.sseDone = nil
+	c.sseMu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	if done != nil {
+		<-done
+	}
+}
+
+// handleSSEStream は SSE 接続を管理し、切断時に再接続するバックグラウンドループ。
+// ctx がキャンセルされると即座に終了する。
+func (c *Client) handleSSEStream(ctx context.Context, sid string, done chan struct{}) {
+	defer close(done)
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		if err := c.runSSELoop(ctx, sid); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			// 再接続前に短時間待機する
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(3 * time.Second):
+			}
+		}
+	}
+}
+
+// runSSELoop は GET /mcp SSE ストリームを読み続け、ping イベントに応答する。
+// 接続が切断されるか ctx がキャンセルされると返る。
+func (c *Client) runSSELoop(ctx context.Context, sid string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpoint, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", sseContentType)
+	req.Header.Set("Authorization", "Bearer "+c.pat)
+	req.Header.Set("X-User-Id", c.userID)
+	if c.tenantID != "" {
+		req.Header.Set("X-Tenant-Id", c.tenantID)
+	}
+	req.Header.Set(mcpSessionIDHeader, sid)
+
+	resp, err := c.sseClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("SSE GET: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("SSE GET HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 128*1024), 128*1024)
+
+	var dataLines []string
+	for scanner.Scan() {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		line := scanner.Text()
+		if line == "" {
+			if len(dataLines) > 0 {
+				c.handleSSEEvent(ctx, sid, []byte(strings.Join(dataLines, "\n")))
+				dataLines = dataLines[:0]
+			}
+		} else if strings.HasPrefix(line, "data:") {
+			dataLines = append(dataLines, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("SSE scan: %w", err)
+	}
+	return io.EOF
+}
+
+// handleSSEEvent は 1 つの SSE データブロックを処理する。
+// ping リクエストを受け取った場合は pong を返す。
+func (c *Client) handleSSEEvent(ctx context.Context, sid string, data []byte) {
+	var msg pingMessage
+	if err := json.Unmarshal(data, &msg); err != nil {
+		return
+	}
+	if msg.Method == "ping" {
+		c.sendPong(ctx, sid, msg.ID)
+	}
+}
+
+// sendPong は ping に対して pong (JSON-RPC result: {}) を POST で返す。
+// sessionID はパラメータ sid で受け取り c.sessionID を読まない (data race 回避)。
+// 8 秒タイムアウトを設定して PING_TIMEOUT_MS (10 秒) 内に応答できるようにする。
+func (c *Client) sendPong(ctx context.Context, sid string, id json.RawMessage) {
+	pongCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+
+	type pongPayload struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Result  json.RawMessage `json:"result"`
+	}
+	body, err := json.Marshal(pongPayload{
+		JSONRPC: "2.0",
+		ID:      id,
+		Result:  json.RawMessage(`{}`),
+	})
+	if err != nil {
+		return
+	}
+
+	req, err := http.NewRequestWithContext(pongCtx, http.MethodPost, c.endpoint, bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", jsonContentType)
+	req.Header.Set("Accept", jsonContentType+", "+sseContentType)
+	req.Header.Set("Authorization", "Bearer "+c.pat)
+	req.Header.Set("X-User-Id", c.userID)
+	if c.tenantID != "" {
+		req.Header.Set("X-Tenant-Id", c.tenantID)
+	}
+	req.Header.Set(mcpSessionIDHeader, sid)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body) //nolint:errcheck
+}
+
+// ──────────────────────────────────────────────────────────────────────── //
 
 // readFirstSSEData は SSE ストリームから最初のイベントの data を返す。
 // agent-hub の tools/call は 1 件のレスポンスしか送らないのでこれで十分。
