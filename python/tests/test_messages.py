@@ -59,7 +59,7 @@ class TestParseMessages:
         assert result[0].caused_by == "root-id"
 
     def test_caused_by_defaults_to_none_when_absent(self) -> None:
-        """v10: caused_by フィールドがない (pre-v10 サーバー / root メッセージ) は None (issue #37)."""
+        """caused_by フィールドがない (pre-v10 / root メッセージ) は None (issue #37)."""
         payload = json.dumps(
             [
                 {
