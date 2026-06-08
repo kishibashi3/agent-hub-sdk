@@ -78,9 +78,10 @@ func WithHTTPTimeout(d time.Duration) ClientOption {
 	return func(c *Client) { c.httpClient.Timeout = d }
 }
 
-// WithTransport は httpClient / sseClient が使う http.Transport を差し替える。
-// 主にテストや CI 環境でのカスタム transport 注入用。
-// sseClient は Timeout=0 (long-lived) で同じ transport を共有する。
+// WithTransport は httpClient / sseClient 両方の http.Transport を差し替える。
+// 主にテストや CI 環境でのカスタム transport 注入用 (モック transport を共有させる場合など)。
+// 本番環境では New() がそれぞれ独立した newTransport() を生成するため、
+// このオプションを呼ぶ必要はない。
 func WithTransport(t *http.Transport) ClientOption {
 	return func(c *Client) {
 		c.httpClient.Transport = t
@@ -123,15 +124,16 @@ func New(endpoint, pat, userID, tenantID string, opts ...ClientOption) (*Client,
 	if userID == "" {
 		return nil, fmt.Errorf("agenthub.New: userID is required")
 	}
-	t := newTransport()
 	c := &Client{
 		endpoint:   endpoint,
 		pat:        pat,
 		userID:     userID,
 		tenantID:   tenantID,
 		clientName: defaultClientName,
-		httpClient: &http.Client{Timeout: 90 * time.Second, Transport: t},
-		sseClient:  &http.Client{Timeout: 0, Transport: t}, // long-lived SSE 接続 — タイムアウト無効
+		// httpClient と sseClient は接続プールを分離するため別インスタンスの Transport を使う。
+		// 共有すると sseClient の長寿命接続が httpClient の MaxIdleConns 枠を消費する。
+		httpClient: &http.Client{Timeout: 90 * time.Second, Transport: newTransport()},
+		sseClient:  &http.Client{Timeout: 0, Transport: newTransport()}, // long-lived SSE 接続 — タイムアウト無効
 	}
 	for _, o := range opts {
 		o(c)
