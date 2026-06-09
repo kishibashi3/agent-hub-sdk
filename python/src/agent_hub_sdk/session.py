@@ -227,9 +227,9 @@ class HubSession:
     async def register(self) -> str:
         """Register the SDK consumer with the hub.
 
-        Sends the ``register`` tool with the configured ``user``,
-        ``display_name``, and ``mode``. Returns the server's confirmation
-        text (useful for logging the registered display name back).
+        Sends the ``register`` tool with the configured ``user`` and
+        ``display_name``. Returns the server's confirmation text (useful
+        for logging the registered display name back).
         """
         display_name = self._config.display_name or self._config.user
         result = await self._call_tool(
@@ -237,7 +237,6 @@ class HubSession:
             {
                 "name": self._config.user,
                 "display_name": display_name,
-                "mode": self._config.mode,
             },
         )
         return raise_for_tool_error(result, op="register")

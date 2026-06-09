@@ -7,7 +7,7 @@ Typical usage::
 
     from agent_hub_sdk import AgentHub, PeerNotFoundError, HubTransientError
 
-    async with AgentHub.connect(user="my-bridge", mode="stateful") as hub:
+    async with AgentHub.connect(user="my-bridge") as hub:
         await hub.register()
         try:
             await hub.send("@peer", "hello")
@@ -30,7 +30,7 @@ from agent_hub_sdk.commands import (
     RestartHandler,
     parse_command,
 )
-from agent_hub_sdk.config import Config, Mode, resolve_config
+from agent_hub_sdk.config import Config, resolve_config
 from agent_hub_sdk.errors import (
     ConfigurationError,
     HubErrorKind,
@@ -53,7 +53,6 @@ __all__ = [
     "HubSession",
     "HubTransientError",
     "IncomingMessage",
-    "Mode",
     "Participant",
     "PeerNotFoundError",
     "RestartHandler",

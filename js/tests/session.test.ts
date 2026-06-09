@@ -75,7 +75,7 @@ function stubClient(behaviour: StubBehaviour = {}): {
 }
 
 describe("HubSession.register", () => {
-  it("calls register tool with mode + displayName fallback", async () => {
+  it("calls register tool with displayName fallback", async () => {
     const { client, calls } = stubClient({
       toolResponses: {
         register: { content: [{ type: "text", text: "registered: @me" }] },
@@ -87,7 +87,7 @@ describe("HubSession.register", () => {
     expect(calls).toEqual([
       {
         tool: "register",
-        args: { name: "me", display_name: "My Role", mode: "stateful" },
+        args: { name: "me", display_name: "My Role" },
       },
     ]);
   });
@@ -438,7 +438,6 @@ describe("AgentHub.connect", () => {
     const stub = stubClient({});
     const handle = await AgentHub.connect({
       user: "alice",
-      mode: "stateful",
       displayName: "Alice the Bridge",
       url: "https://hub.example/mcp",
       pat: "ghp",
@@ -451,7 +450,6 @@ describe("AgentHub.connect", () => {
     expect(registerCalls[0]?.args).toEqual({
       name: "alice",
       display_name: "Alice the Bridge",
-      mode: "stateful",
     });
     await handle[Symbol.asyncDispose]();
   });
@@ -460,7 +458,6 @@ describe("AgentHub.connect", () => {
     const stub = stubClient({});
     const handle = await AgentHub.connect({
       user: "bob",
-      mode: "stateless",
       // displayName intentionally omitted
       url: "https://hub.example/mcp",
       pat: "ghp",
@@ -470,7 +467,6 @@ describe("AgentHub.connect", () => {
     const registerCalls = stub.calls.filter((c) => c.tool === "register");
     expect(registerCalls).toHaveLength(1);
     expect(registerCalls[0]?.args.display_name).toBe("bob");
-    expect(registerCalls[0]?.args.mode).toBe("stateless");
     await handle[Symbol.asyncDispose]();
   });
 

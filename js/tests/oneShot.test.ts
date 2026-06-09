@@ -228,7 +228,6 @@ describe("HubSession.oneShot — nested inside AgentHub.connect", () => {
 
     const handle = await AgentHub.connect({
       user: "translator",
-      mode: "stateless",
       url: "https://hub.example/mcp",
       pat: "ghp_xxx",
       env: {},
@@ -248,7 +247,6 @@ describe("HubSession.oneShot — nested inside AgentHub.connect", () => {
     // Both called with the same Config.
     expect(opens[0]).toEqual(opens[1]);
     expect(opens[0]?.user).toBe("translator");
-    expect(opens[0]?.mode).toBe("stateless");
 
     expect(innerHandle.session).not.toBe(handle.session);
 
