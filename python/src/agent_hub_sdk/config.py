@@ -18,7 +18,7 @@ from typing import Literal
 
 from agent_hub_sdk.errors import ConfigurationError
 
-__all__ = ["Config", "Mode", "resolve_config", "make_headers"]
+__all__ = ["Config", "Mode", "make_headers", "resolve_config"]
 
 #: Worker mode declared at register-time. ``stateful`` is the only mode
 #: supported in M1; ``stateless`` lands in M3 and ``global`` in M5.
