@@ -18,7 +18,7 @@ class TestResolveConfigFailFast:
 
     def test_both_url_and_pat_missing_raises(self) -> None:
         with pytest.raises(ConfigurationError) as exc_info:
-            resolve_config(user="me", env={})
+            resolve_config(participant="me", env={})
         msg = str(exc_info.value)
         assert "url" in msg
         assert "pat" in msg
@@ -33,21 +33,21 @@ class TestResolveConfigFailFast:
 
     def test_url_missing_only_raises(self) -> None:
         with pytest.raises(ConfigurationError, match="url"):
-            resolve_config(user="me", pat="ghp_xxx", env={})
+            resolve_config(participant="me", pat="ghp_xxx", env={})
 
     def test_pat_missing_only_raises(self) -> None:
         with pytest.raises(ConfigurationError, match="pat"):
-            resolve_config(user="me", url="https://hub/mcp", env={})
+            resolve_config(participant="me", url="https://hub/mcp", env={})
 
     def test_empty_user_raises(self) -> None:
-        with pytest.raises(ConfigurationError, match="user"):
-            resolve_config(user="", url="https://hub/mcp", pat="ghp", env={})
+        with pytest.raises(ConfigurationError, match="participant"):
+            resolve_config(participant="", url="https://hub/mcp", pat="ghp", env={})
 
     def test_no_implicit_localhost_fallback(self) -> None:
         # Even if everything else is set, an empty URL is not silently
         # filled in. This is the literal redline.
         with pytest.raises(ConfigurationError):
-            resolve_config(user="me", url=None, pat="ghp", env={})
+            resolve_config(participant="me", url=None, pat="ghp", env={})
 
 
 class TestResolveConfigPrecedence:
@@ -55,7 +55,7 @@ class TestResolveConfigPrecedence:
 
     def test_kwarg_wins_over_env(self) -> None:
         config = resolve_config(
-            user="me",
+            participant="me",
             url="https://kw-url/mcp",
             pat="ghp_kw",
             env={"AGENT_HUB_URL": "https://env-url/mcp", "GITHUB_PAT": "ghp_env"},
@@ -65,7 +65,7 @@ class TestResolveConfigPrecedence:
 
     def test_env_used_when_kwarg_absent(self) -> None:
         config = resolve_config(
-            user="me",
+            participant="me",
             env={
                 "AGENT_HUB_URL": "https://env-url/mcp",
                 "GITHUB_PAT": "ghp_env",
@@ -84,7 +84,7 @@ class TestMakeHeaders:
 
     def test_required_headers(self) -> None:
         config = Config(
-            user="me",
+            participant="me",
             display_name=None,
             tenant=None,
             url="https://hub/mcp",
@@ -92,13 +92,13 @@ class TestMakeHeaders:
         )
         headers = make_headers(config)
         assert headers["Authorization"] == "Bearer ghp_xxx"
-        assert headers["X-User-Id"] == "me"
+        assert headers["X-Participant-Id"] == "me"
         # Tenant absent → no X-Tenant-Id header (= default tenant).
         assert "X-Tenant-Id" not in headers
 
     def test_tenant_header_emitted(self) -> None:
         config = Config(
-            user="me",
+            participant="me",
             display_name=None,
             tenant="kaz",
             url="https://hub/mcp",

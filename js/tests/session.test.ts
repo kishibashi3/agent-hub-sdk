@@ -9,7 +9,7 @@ import {
   ConfigurationError,
   HubSession,
   HubTransientError,
-  PeerNotFoundError,
+  ParticipantNotFoundError,
   type Config,
   type McpClient,
   type McpNotification,
@@ -17,7 +17,7 @@ import {
 
 function mkConfig(overrides: Partial<Config> = {}): Config {
   return {
-    user: "me",
+    participant: "me",
     displayName: null,
     mode: "stateful",
     tenant: null,
@@ -92,7 +92,7 @@ describe("HubSession.register", () => {
     ]);
   });
 
-  it("falls back to user when displayName is null", async () => {
+  it("falls back to participant when displayName is null", async () => {
     const { client, calls } = stubClient({
       toolResponses: {
         register: { content: [{ type: "text", text: "ok" }] },
@@ -126,7 +126,7 @@ describe("HubSession.send", () => {
     });
     const session = new HubSession(client, mkConfig());
     await expect(session.send("@gemma", "hi")).rejects.toBeInstanceOf(
-      PeerNotFoundError,
+      ParticipantNotFoundError,
     );
   });
 
@@ -237,7 +237,7 @@ describe("HubSession.sendWithRetry", () => {
           slept.push(ms);
         },
       }),
-    ).rejects.toBeInstanceOf(PeerNotFoundError);
+    ).rejects.toBeInstanceOf(ParticipantNotFoundError);
     expect(calls).toHaveLength(1);
     expect(slept).toEqual([]);
   });
@@ -407,14 +407,14 @@ describe("HubSession.inboxPushes", () => {
 describe("AgentHub.connect", () => {
   it("fails fast on missing config (no env override)", async () => {
     await expect(
-      AgentHub.connect({ user: "me", url: null, pat: null, env: {} }),
+      AgentHub.connect({ participant: "me", url: null, pat: null, env: {} }),
     ).rejects.toBeInstanceOf(ConfigurationError);
   });
 
   it("calls factory with resolved config when valid", async () => {
     const seen: Config[] = [];
     const handle = await AgentHub.connect({
-      user: "me",
+      participant: "me",
       url: "https://hub.example/mcp",
       pat: "ghp",
       env: {},
@@ -437,7 +437,7 @@ describe("AgentHub.connect", () => {
   it("M5: auto-registers before returning the handle", async () => {
     const stub = stubClient({});
     const handle = await AgentHub.connect({
-      user: "alice",
+      participant: "alice",
       displayName: "Alice the Bridge",
       url: "https://hub.example/mcp",
       pat: "ghp",
@@ -454,10 +454,10 @@ describe("AgentHub.connect", () => {
     await handle[Symbol.asyncDispose]();
   });
 
-  it("M5: falls back display_name to user when not supplied", async () => {
+  it("M5: falls back display_name to participant when not supplied", async () => {
     const stub = stubClient({});
     const handle = await AgentHub.connect({
-      user: "bob",
+      participant: "bob",
       // displayName intentionally omitted
       url: "https://hub.example/mcp",
       pat: "ghp",
@@ -489,7 +489,7 @@ describe("AgentHub.connect", () => {
     };
     await expect(
       AgentHub.connect({
-        user: "carol",
+        participant: "carol",
         url: "https://hub.example/mcp",
         pat: "ghp",
         env: {},
@@ -513,7 +513,7 @@ describe("AgentHub.connect", () => {
       },
     });
     const handle = await AgentHub.connect({
-      user: "dave",
+      participant: "dave",
       url: "https://hub.example/mcp",
       pat: "ghp",
       env: {},

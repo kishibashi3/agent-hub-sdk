@@ -25,22 +25,22 @@ export class ConfigurationError extends Error {
 }
 
 /**
- * ``send`` target peer is not registered on the hub or is offline.
+ * ``send`` target participant is not registered on the hub or is offline.
  *
  * Retry is meaningless. Surfacing this as a distinct class lets a
  * bridge (e.g. VS Code) react with a user-visible warning instead of
  * a generic transient error.
  */
-export class PeerNotFoundError extends Error {
+export class ParticipantNotFoundError extends Error {
   readonly peer: string;
   readonly detail: string;
 
   constructor(peer: string, detail: string) {
     super(`peer ${peer} not found on agent-hub: ${detail}`);
-    this.name = "PeerNotFoundError";
+    this.name = "ParticipantNotFoundError";
     this.peer = peer;
     this.detail = detail;
-    Object.setPrototypeOf(this, PeerNotFoundError.prototype);
+    Object.setPrototypeOf(this, ParticipantNotFoundError.prototype);
   }
 }
 
@@ -63,7 +63,7 @@ export class HubTransientError extends Error {
  * Classification of an agent-hub error string. Mirrors Python's
  * ``HubErrorKind`` literal type.
  */
-export type HubErrorKind = "peer_not_found" | "transient" | "unknown";
+export type HubErrorKind = "participant_not_found" | "transient" | "unknown";
 
 // Patterns for "peer not found" / "peer offline" agent-hub error
 // strings. Includes both English and Japanese because the production
@@ -125,7 +125,7 @@ export function classifyHubError(
   const textLower = errorText.toLowerCase();
   for (const pattern of PEER_NOT_FOUND_PATTERNS) {
     if (textLower.includes(pattern)) {
-      return "peer_not_found";
+      return "participant_not_found";
     }
   }
   for (const pattern of TRANSIENT_PATTERNS) {

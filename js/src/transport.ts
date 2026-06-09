@@ -3,12 +3,12 @@
 //
 // These functions extract content from MCP ``CallToolResult`` records
 // and route ``isError=true`` responses through ``classifyHubError`` so
-// callers deal in ``PeerNotFoundError`` / ``HubTransientError`` instead
+// callers deal in ``ParticipantNotFoundError`` / ``HubTransientError`` instead
 // of inspecting tool-result blobs by hand.
 
 import {
   HubTransientError,
-  PeerNotFoundError,
+  ParticipantNotFoundError,
   classifyHubError,
 } from "./errors.js";
 
@@ -78,7 +78,7 @@ export function raiseForToolError(result: ToolResult, op: string): string {
  * Same shape as ``raiseForToolError`` but classifies ``isError``
  * payloads into three buckets:
  *
- * - peer_not_found → ``PeerNotFoundError``
+ * - participant_not_found → ``ParticipantNotFoundError``
  * - transient → ``HubTransientError``
  * - anything else → ``Error``
  */
@@ -88,8 +88,8 @@ export function raiseForSendError(result: ToolResult, to: string): string {
     return text;
   }
   const kind = classifyHubError(text);
-  if (kind === "peer_not_found") {
-    throw new PeerNotFoundError(to, text || "(no detail)");
+  if (kind === "participant_not_found") {
+    throw new ParticipantNotFoundError(to, text || "(no detail)");
   }
   if (kind === "transient") {
     throw new HubTransientError(`send to ${to} transient: ${text || "(no detail)"}`);

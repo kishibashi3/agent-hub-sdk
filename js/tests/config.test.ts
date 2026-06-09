@@ -7,11 +7,11 @@ import { ConfigurationError, makeHeaders, resolveConfig } from "../src/index.js"
 
 describe("resolveConfig fail-fast", () => {
   it("throws when both url and pat are missing", () => {
-    expect(() => resolveConfig({ user: "me", env: {} })).toThrow(
+    expect(() => resolveConfig({ participant: "me", env: {} })).toThrow(
       ConfigurationError,
     );
     try {
-      resolveConfig({ user: "me", env: {} });
+      resolveConfig({ participant: "me", env: {} });
     } catch (err) {
       const msg = (err as Error).message;
       expect(msg).toContain("url");
@@ -26,26 +26,26 @@ describe("resolveConfig fail-fast", () => {
 
   it("throws when only url is missing", () => {
     expect(() =>
-      resolveConfig({ user: "me", pat: "ghp_x", env: {} }),
+      resolveConfig({ participant: "me", pat: "ghp_x", env: {} }),
     ).toThrow(/url/);
   });
 
   it("throws when only pat is missing", () => {
     expect(() =>
-      resolveConfig({ user: "me", url: "https://hub/mcp", env: {} }),
+      resolveConfig({ participant: "me", url: "https://hub/mcp", env: {} }),
     ).toThrow(/pat/);
   });
 
-  it("throws when user is empty", () => {
+  it("throws when participant is empty", () => {
     expect(() =>
-      resolveConfig({ user: "", url: "https://hub/mcp", pat: "ghp", env: {} }),
-    ).toThrow(/user/);
+      resolveConfig({ participant: "", url: "https://hub/mcp", pat: "ghp", env: {} }),
+    ).toThrow(/participant/);
   });
 
   it("does not silently fall back to localhost", () => {
     // Even with everything else set, missing url is not auto-filled.
     expect(() =>
-      resolveConfig({ user: "me", url: null, pat: "ghp", env: {} }),
+      resolveConfig({ participant: "me", url: null, pat: "ghp", env: {} }),
     ).toThrow(ConfigurationError);
   });
 });
@@ -53,7 +53,7 @@ describe("resolveConfig fail-fast", () => {
 describe("resolveConfig precedence", () => {
   it("kwarg wins over env", () => {
     const config = resolveConfig({
-      user: "me",
+      participant: "me",
       url: "https://kw-url/mcp",
       pat: "ghp_kw",
       env: { AGENT_HUB_URL: "https://env-url/mcp", GITHUB_PAT: "ghp_env" },
@@ -64,7 +64,7 @@ describe("resolveConfig precedence", () => {
 
   it("env used when kwarg absent", () => {
     const config = resolveConfig({
-      user: "me",
+      participant: "me",
       env: {
         AGENT_HUB_URL: "https://env-url/mcp",
         GITHUB_PAT: "ghp_env",
@@ -83,20 +83,20 @@ describe("resolveConfig precedence", () => {
 describe("makeHeaders", () => {
   it("emits required headers without tenant", () => {
     const headers = makeHeaders({
-      user: "me",
+      participant: "me",
       displayName: null,
       tenant: null,
       url: "https://hub/mcp",
       pat: "ghp_xxx",
     });
     expect(headers.Authorization).toBe("Bearer ghp_xxx");
-    expect(headers["X-User-Id"]).toBe("me");
+    expect(headers["X-Participant-Id"]).toBe("me");
     expect(headers).not.toHaveProperty("X-Tenant-Id");
   });
 
   it("emits X-Tenant-Id when tenant is set", () => {
     const headers = makeHeaders({
-      user: "me",
+      participant: "me",
       displayName: null,
       tenant: "kaz",
       url: "https://hub/mcp",

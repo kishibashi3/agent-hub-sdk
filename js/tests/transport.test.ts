@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   HubTransientError,
-  PeerNotFoundError,
+  ParticipantNotFoundError,
   extractText,
   raiseForSendError,
   raiseForToolError,
@@ -68,16 +68,16 @@ describe("raiseForSendError", () => {
     );
   });
 
-  it("throws PeerNotFoundError on peer-not-found", () => {
+  it("throws ParticipantNotFoundError on peer-not-found", () => {
     let caught: unknown;
     try {
       raiseForSendError(textResult("宛先 @gemma は存在しません", true), "@gemma");
     } catch (err) {
       caught = err;
     }
-    expect(caught).toBeInstanceOf(PeerNotFoundError);
-    expect((caught as PeerNotFoundError).peer).toBe("@gemma");
-    expect((caught as PeerNotFoundError).detail).toContain("存在しません");
+    expect(caught).toBeInstanceOf(ParticipantNotFoundError);
+    expect((caught as ParticipantNotFoundError).peer).toBe("@gemma");
+    expect((caught as ParticipantNotFoundError).detail).toContain("存在しません");
   });
 
   it("throws HubTransientError on transient", () => {
@@ -97,7 +97,7 @@ describe("raiseForSendError", () => {
       caught = err;
     }
     expect(caught).toBeInstanceOf(Error);
-    expect(caught).not.toBeInstanceOf(PeerNotFoundError);
+    expect(caught).not.toBeInstanceOf(ParticipantNotFoundError);
     expect(caught).not.toBeInstanceOf(HubTransientError);
   });
 });

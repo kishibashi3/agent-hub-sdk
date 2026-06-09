@@ -2,7 +2,7 @@
 
 These functions extract content from ``CallToolResult`` records and route
 ``isError=True`` responses through :func:`classify_hub_error` so callers
-deal in :class:`PeerNotFoundError` / :class:`HubTransientError` rather than
+deal in :class:`ParticipantNotFoundError` / :class:`HubTransientError` rather than
 inspecting tool-result blobs by hand.
 
 Tool transport itself (MCP ``ClientSession`` over streamable HTTP) lives in
@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 
 from agent_hub_sdk.errors import (
     HubTransientError,
-    PeerNotFoundError,
+    ParticipantNotFoundError,
     classify_hub_error,
 )
 
@@ -79,19 +79,19 @@ def raise_for_send_error(
     Same shape as :func:`raise_for_tool_error` but classifies ``isError``
     payloads into three buckets:
 
-    - peer_not_found → :class:`PeerNotFoundError`
+    - participant_not_found → :class:`ParticipantNotFoundError`
     - transient → :class:`HubTransientError`
     - anything else → :class:`RuntimeError`
 
     :param to: the ``send`` recipient handle, used to populate
-        ``PeerNotFoundError.peer``.
+        ``ParticipantNotFoundError.peer``.
     """
     text = extract_text(result.content)
     if not result.isError:
         return text
     kind = classify_hub_error(text)
-    if kind == "peer_not_found":
-        raise PeerNotFoundError(peer=to, detail=text or "(no detail)")
+    if kind == "participant_not_found":
+        raise ParticipantNotFoundError(peer=to, detail=text or "(no detail)")
     if kind == "transient":
         raise HubTransientError(f"send to {to} transient: {text or '(no detail)'}")
     raise RuntimeError(f"send to {to} failed: {text or '(no detail)'}")

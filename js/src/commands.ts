@@ -161,7 +161,7 @@ export interface CommandOptions {
  * router.passthrough("/explain", { description: "ask the LLM" });
  *
  * await using handle = await AgentHub.connect({
- *   user: "my-bridge",
+ *   participant: "my-bridge",
  *   mcpClientFactory: createMyMcpClient,
  * });
  * const hub = handle.session;

@@ -24,9 +24,9 @@ from agent_hub_sdk import AgentHub, ConfigurationError, HubSession
 from agent_hub_sdk.config import Config
 
 
-def _config(*, user: str = "me") -> Config:
+def _config(*, participant: str = "me") -> Config:
     return Config(
-        user=user,
+        participant=participant,
         display_name=None,
         tenant=None,
         url="https://hub.example/mcp",
@@ -99,7 +99,7 @@ class TestOneShotLifecycle:
         # must see the same URL, PAT, tenant, etc. — otherwise it's
         # opening against a different hub.
         cfg = Config(
-            user="translator",
+            participant="translator",
             display_name="JP/EN translator",
             tenant="kaz",
             url="https://hub.example/mcp",
@@ -119,7 +119,7 @@ class TestOneShotLifecycle:
             pass
 
         assert seen == [cfg]
-        assert seen[0].user == "translator"
+        assert seen[0].participant == "translator"
         assert seen[0].tenant == "kaz"
 
     async def test_cleanup_runs_on_normal_exit(
@@ -254,7 +254,7 @@ class TestOneShotNested:
         monkeypatch.setattr(HubSession, "open", classmethod(fake_open))
 
         async with AgentHub.connect(
-            user="translator",
+            participant="translator",
             url="https://hub.example/mcp",
             pat="ghp_xxx",
         ) as outer_hub:
@@ -294,5 +294,5 @@ class TestOneShotConfigPassthrough:
         monkeypatch.delenv("AGENT_HUB_URL", raising=False)
         monkeypatch.delenv("GITHUB_PAT", raising=False)
         with pytest.raises(ConfigurationError):
-            async with AgentHub.connect(user="me", url=None, pat=None):
+            async with AgentHub.connect(participant="me", url=None, pat=None):
                 pass  # pragma: no cover — should never reach

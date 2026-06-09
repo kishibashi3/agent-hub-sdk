@@ -227,15 +227,15 @@ class HubSession:
     async def register(self) -> str:
         """Register the SDK consumer with the hub.
 
-        Sends the ``register`` tool with the configured ``user`` and
+        Sends the ``register`` tool with the configured ``participant`` and
         ``display_name``. Returns the server's confirmation text (useful
         for logging the registered display name back).
         """
-        display_name = self._config.display_name or self._config.user
+        display_name = self._config.display_name or self._config.participant
         result = await self._call_tool(
             "register",
             {
-                "name": self._config.user,
+                "name": self._config.participant,
                 "display_name": display_name,
             },
         )
@@ -262,7 +262,7 @@ class HubSession:
             spontaneous messages / new task starts. No auto-propagation —
             incorrect causal links are more harmful than missing ones.
             See issue #162 for design rationale.
-        :raises PeerNotFoundError: recipient not registered / offline.
+        :raises ParticipantNotFoundError: recipient not registered / offline.
         :raises HubTransientError: 5xx / network / timeout.
         :raises RuntimeError: any other error class the server returns.
         """
@@ -305,7 +305,7 @@ class HubSession:
         :param sleep_fn: injected sleep for tests; defaults to
             :func:`anyio.sleep`.
 
-        :raises PeerNotFoundError: raised immediately (retry is meaningless).
+        :raises ParticipantNotFoundError: raised immediately (retry is meaningless).
         :raises HubTransientError: the final attempt was still transient.
         :raises RuntimeError: any non-retriable failure.
         """
@@ -365,7 +365,7 @@ class HubSession:
         After this call returns, :meth:`inbox_pushes` will start yielding
         URIs as the server emits ``ResourceUpdatedNotification`` events.
         """
-        inbox_uri = AnyUrl(f"inbox://@{self._config.user}")
+        inbox_uri = AnyUrl(f"inbox://@{self._config.participant}")
         await self._session.subscribe_resource(inbox_uri)
 
     async def inbox_pushes(self) -> AsyncIterator[str]:
@@ -472,7 +472,7 @@ class HubSession:
 
         Usage::
 
-            async with AgentHub.connect(user="my-bridge") as hub:
+            async with AgentHub.connect(participant="my-bridge") as hub:
                 await hub.register()
                 async with hub.inbox() as messages:
                     async for msg in messages:
@@ -744,7 +744,7 @@ class HubSession:
 
         .. code-block:: python
 
-            async with AgentHub.connect(user="translator", mode="stateless") as hub:
+            async with AgentHub.connect(participant="translator", mode="stateless") as hub:
                 await hub.register()
                 await hub.subscribe_inbox()
 
@@ -769,7 +769,7 @@ class HubSession:
         - reads from a brand-new push stream (= the outer session's
           push events are not delivered here);
         - shares only the immutable :class:`Config` with the outer hub
-          (= same URL, PAT, tenant, user, mode declaration).
+          (= same URL, PAT, tenant, participant, mode declaration).
 
         **Cleanup.** When the ``async with`` block exits — normally or
         via exception — the inner session's streamable-HTTP transport

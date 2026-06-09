@@ -7,7 +7,7 @@ import pytest
 from agent_hub_sdk import (
     ConfigurationError,
     HubTransientError,
-    PeerNotFoundError,
+    ParticipantNotFoundError,
     classify_hub_error,
 )
 
@@ -28,8 +28,8 @@ class TestClassifyHubError:
             "オフライン状態です",
         ],
     )
-    def test_peer_not_found(self, text: str) -> None:
-        assert classify_hub_error(text) == "peer_not_found"
+    def test_participant_not_found(self, text: str) -> None:
+        assert classify_hub_error(text) == "participant_not_found"
 
     @pytest.mark.parametrize(
         "text",
@@ -68,7 +68,7 @@ class TestErrorClasses:
     """The custom error classes carry useful structured detail."""
 
     def test_peer_not_found_carries_peer_and_detail(self) -> None:
-        exc = PeerNotFoundError("@gemma", "offline")
+        exc = ParticipantNotFoundError("@gemma", "offline")
         assert exc.peer == "@gemma"
         assert exc.detail == "offline"
         assert "@gemma" in str(exc)

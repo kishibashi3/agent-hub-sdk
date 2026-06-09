@@ -3,9 +3,9 @@
 // Status: M4 (TypeScript port). Mirrors the Python SDK 1:1.
 //
 // ```ts
-// import { AgentHub, CommandRouter, HubTransientError, PeerNotFoundError } from "@kishibashi3/agent-hub-sdk";
+// import { AgentHub, CommandRouter, HubTransientError, ParticipantNotFoundError } from "@kishibashi3/agent-hub-sdk";
 //
-// await using hub = await AgentHub.connect({ user: "my-bridge", mode: "stateful" });
+// await using hub = await AgentHub.connect({ participant: "my-bridge", mode: "stateful" });
 // await hub.session.register();
 // const router = new CommandRouter();
 // router.command("/active", async (msg, hub, args) => `working on ${task}`);
@@ -43,7 +43,7 @@ export {
 export {
   ConfigurationError,
   HubTransientError,
-  PeerNotFoundError,
+  ParticipantNotFoundError,
   classifyHubError,
   type HubErrorKind,
 } from "./errors.js";

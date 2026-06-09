@@ -5,7 +5,7 @@ Three custom errors plus a classifier:
 - ``ConfigurationError`` — required config (``url`` / ``pat``) missing from both
   env and caller args. **Fail-fast**: no ``localhost:3000`` fallback, no
   implicit default URL. (See ``docs/design.md`` §4 — this is redline #1.)
-- ``PeerNotFoundError`` — the ``send`` target is not registered on the hub or
+- ``ParticipantNotFoundError`` — the ``send`` target is not registered on the hub or
   is offline. No retry is meaningful.
 - ``HubTransientError`` — server 5xx / network / timeout. Retry-with-backoff
   is appropriate. ``send_with_retry`` does this for you; if the retry budget
@@ -27,6 +27,7 @@ __all__ = [
     "ConfigurationError",
     "HubErrorKind",
     "HubTransientError",
+    "ParticipantNotFoundError",
     "PeerNotFoundError",
     "classify_hub_error",
 ]
@@ -45,11 +46,11 @@ class ConfigurationError(RuntimeError):
     """
 
 
-class PeerNotFoundError(RuntimeError):
-    """``send`` target peer is not registered on the hub or is offline.
+class ParticipantNotFoundError(RuntimeError):
+    """``send`` target participant is not registered on the hub or is offline.
 
-    Retry is meaningless — the peer is not going to materialise from a retry
-    loop. Surfacing this as a distinct class lets a bridge (e.g. Slack)
+    Retry is meaningless — the participant is not going to materialise from a
+    retry loop. Surfacing this as a distinct class lets a bridge (e.g. Slack)
     react with a Slack-visible warning like "``@gemma`` is not registered"
     instead of a generic transient error.
     """
@@ -70,7 +71,11 @@ class HubTransientError(RuntimeError):
     """
 
 
-HubErrorKind = Literal["peer_not_found", "transient", "unknown"]
+HubErrorKind = Literal["participant_not_found", "transient", "unknown"]
+
+# Backward-compat alias: bridges imported PeerNotFoundError before SDK #52 rename.
+# Keep until bridges are migrated to ParticipantNotFoundError.
+PeerNotFoundError = ParticipantNotFoundError
 
 # Patterns for "peer not found" / "peer offline" agent-hub error strings.
 # Includes both English and Japanese because the production server returns
@@ -124,13 +129,13 @@ def classify_hub_error(error_text: str | None) -> HubErrorKind:
 
     :param error_text: the raw error text from an ``isError=True`` tool
         result, or ``None`` if no body was present.
-    :returns: one of ``"peer_not_found"``, ``"transient"``, ``"unknown"``.
+    :returns: one of ``"participant_not_found"``, ``"transient"``, ``"unknown"``.
     """
     if not error_text:
         return "unknown"
     text_lower = error_text.lower()
     if any(p in text_lower for p in _PEER_NOT_FOUND_PATTERNS):
-        return "peer_not_found"
+        return "participant_not_found"
     if any(p in text_lower for p in _TRANSIENT_PATTERNS):
         return "transient"
     return "unknown"
