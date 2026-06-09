@@ -4,7 +4,16 @@ All notable changes to `agent-hub-sdk` are recorded here. Format follows [Keep a
 
 Until `v1.0.0`, breaking changes between minor versions are possible. Each release tag (`vX.Y.Z` on `main`) corresponds to one section below.
 
-## [Unreleased]
+## [0.8.0] — 2026-06-09
+
+### Added — `X-Agent-Hub-Client` header support via `client_type` (agent-hub issue #280)
+
+- **`Config.client_type: str | None`** — new optional field. When set, `make_headers` emits `X-Agent-Hub-Client: <value>` in every MCP HTTP request so the server can auto-determine the worker mode from the client identity (agent-hub issue #276 / PR #279).
+- **`resolve_config`** accepts `client_type: str | None = None`; falls back to env var `AGENT_HUB_CLIENT`.
+- **`AgentHub.connect`** accepts `client_type: str | None = None`; forwards to `resolve_config`.
+- Typical values: `"agent-hub-bridge/claude"`, `"agent-hub-bridge/gemini"`, `"agent-hub-bridge/slack"`, `"agent-hub-bridge/a2a"`, `"agent-hub-client/codex"`, `"agent-hub-plugin/<user-id>"`.
+- Non-breaking: `client_type` defaults to `None` everywhere; header is silently omitted when unset (= same behaviour as before for any consumer that doesn't pass the value).
+- No existing test changes required — the 150 existing tests still pass.
 
 ### Added — TypeScript port of `hub.inbox()` + `hub.oneShot()` (issue #20)
 

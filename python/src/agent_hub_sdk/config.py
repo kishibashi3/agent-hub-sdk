@@ -18,7 +18,7 @@ from typing import Literal
 
 from agent_hub_sdk.errors import ConfigurationError
 
-__all__ = ["Config", "Mode", "resolve_config"]
+__all__ = ["Config", "Mode", "make_headers", "resolve_config"]
 
 #: Worker mode declared at register-time. ``stateful`` is the only mode
 #: supported in M1; ``stateless`` lands in M3 and ``global`` in M5.
@@ -58,12 +58,20 @@ class Config:
     #: ``ConfigurationError``.
     pat: str
 
+    #: Optional ``X-Agent-Hub-Client`` header value (e.g.
+    #: ``"agent-hub-bridge/claude"``).  When set, the header is included in
+    #: every MCP HTTP request so the server can auto-determine the worker
+    #: mode from the client identity (issue #276 / PR #279).  ``None`` omits
+    #: the header (= server falls back to its default logic).
+    client_type: str | None = None
+
 
 # Environment variable names consulted when the caller does not pass a value.
 ENV_URL = "AGENT_HUB_URL"
 ENV_PAT = "GITHUB_PAT"
 ENV_TENANT = "AGENT_HUB_TENANT"
 ENV_DISPLAY_NAME = "AGENT_HUB_DISPLAY_NAME"
+ENV_CLIENT = "AGENT_HUB_CLIENT"
 
 
 def resolve_config(
@@ -74,6 +82,7 @@ def resolve_config(
     display_name: str | None = None,
     url: str | None = None,
     pat: str | None = None,
+    client_type: str | None = None,
     env: dict[str, str] | None = None,
 ) -> Config:
     """Merge caller args + environment into a :class:`Config`.
@@ -88,6 +97,9 @@ def resolve_config(
     :param display_name: human-readable role descriptor.
     :param url: agent-hub MCP endpoint. Falls back to ``AGENT_HUB_URL``.
     :param pat: GitHub PAT. Falls back to ``GITHUB_PAT``.
+    :param client_type: ``X-Agent-Hub-Client`` header value (e.g.
+        ``"agent-hub-bridge/claude"``).  Falls back to ``AGENT_HUB_CLIENT``
+        env var.  ``None`` → header omitted.
     :param env: environment-variable lookup table for testing. Defaults to
         :data:`os.environ`.
     :raises ConfigurationError: if ``user`` is empty, or if either ``url``
@@ -108,6 +120,7 @@ def resolve_config(
     resolved_pat = pat or env_map.get(ENV_PAT)
     resolved_tenant = tenant or env_map.get(ENV_TENANT)
     resolved_display = display_name or env_map.get(ENV_DISPLAY_NAME)
+    resolved_client = client_type or env_map.get(ENV_CLIENT)
 
     missing: list[str] = []
     if not resolved_url:
@@ -130,6 +143,7 @@ def resolve_config(
         tenant=resolved_tenant,
         url=resolved_url,  # type: ignore[arg-type]
         pat=resolved_pat,  # type: ignore[arg-type]
+        client_type=resolved_client,
     )
 
 
@@ -138,7 +152,10 @@ def make_headers(config: Config) -> dict[str, str]:
 
     Authorization is the GitHub PAT as a bearer token; ``X-User-Id`` declares
     the SDK consumer's handle; ``X-Tenant-Id`` is added only when a tenant is
-    set (the server treats the absence as the default tenant).
+    set (the server treats the absence as the default tenant);
+    ``X-Agent-Hub-Client`` is added when ``config.client_type`` is set so the
+    server can auto-determine the worker mode from the client identity (issue
+    #276 / PR #279 of agent-hub).
     """
     headers = {
         "Authorization": f"Bearer {config.pat}",
@@ -146,4 +163,6 @@ def make_headers(config: Config) -> dict[str, str]:
     }
     if config.tenant:
         headers["X-Tenant-Id"] = config.tenant
+    if config.client_type:
+        headers["X-Agent-Hub-Client"] = config.client_type
     return headers
