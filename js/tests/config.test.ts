@@ -78,26 +78,6 @@ describe("resolveConfig precedence", () => {
     expect(config.displayName).toBe("Test Role");
   });
 
-  it("default mode is stateful", () => {
-    const config = resolveConfig({
-      user: "me",
-      url: "https://hub/mcp",
-      pat: "ghp",
-      env: {},
-    });
-    expect(config.mode).toBe("stateful");
-  });
-
-  it("mode arg passes through", () => {
-    const config = resolveConfig({
-      user: "me",
-      mode: "stateless",
-      url: "https://hub/mcp",
-      pat: "ghp",
-      env: {},
-    });
-    expect(config.mode).toBe("stateless");
-  });
 });
 
 describe("makeHeaders", () => {
@@ -105,7 +85,6 @@ describe("makeHeaders", () => {
     const headers = makeHeaders({
       user: "me",
       displayName: null,
-      mode: "stateful",
       tenant: null,
       url: "https://hub/mcp",
       pat: "ghp_xxx",
@@ -119,7 +98,6 @@ describe("makeHeaders", () => {
     const headers = makeHeaders({
       user: "me",
       displayName: null,
-      mode: "stateful",
       tenant: "kaz",
       url: "https://hub/mcp",
       pat: "ghp_xxx",

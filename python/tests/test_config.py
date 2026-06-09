@@ -78,22 +78,6 @@ class TestResolveConfigPrecedence:
         assert config.tenant == "kaz"
         assert config.display_name == "Test Role"
 
-    def test_default_mode_is_stateful(self) -> None:
-        config = resolve_config(
-            user="me", url="https://hub/mcp", pat="ghp", env={}
-        )
-        assert config.mode == "stateful"
-
-    def test_mode_arg_passes_through(self) -> None:
-        config = resolve_config(
-            user="me",
-            mode="stateless",
-            url="https://hub/mcp",
-            pat="ghp",
-            env={},
-        )
-        assert config.mode == "stateless"
-
 
 class TestMakeHeaders:
     """``make_headers`` produces the right MCP HTTP shape."""
@@ -102,7 +86,6 @@ class TestMakeHeaders:
         config = Config(
             user="me",
             display_name=None,
-            mode="stateful",
             tenant=None,
             url="https://hub/mcp",
             pat="ghp_xxx",
@@ -117,7 +100,6 @@ class TestMakeHeaders:
         config = Config(
             user="me",
             display_name=None,
-            mode="stateful",
             tenant="kaz",
             url="https://hub/mcp",
             pat="ghp_xxx",

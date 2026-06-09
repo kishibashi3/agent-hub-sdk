@@ -14,12 +14,6 @@
 import { ConfigurationError } from "./errors.js";
 
 /**
- * Worker mode declared at register-time. M1 implements ``stateful``
- * end-to-end; ``stateless`` is the M3 pattern; ``global`` is M5.
- */
-export type Mode = "stateful" | "stateless" | "global";
-
-/**
  * Resolved configuration for one ``AgentHub`` session. Built by
  * ``resolveConfig`` from caller args + environment. Treated as
  * immutable for the lifetime of the session.
@@ -29,8 +23,6 @@ export interface Config {
   readonly user: string;
   /** Human-readable role descriptor; null if unspecified. */
   readonly displayName: string | null;
-  /** Worker-mode declaration. */
-  readonly mode: Mode;
   /** Tenant scope. ``null`` routes to the default tenant. */
   readonly tenant: string | null;
   /** agent-hub MCP endpoint. */
@@ -50,7 +42,6 @@ export const ENV_DISPLAY_NAME = "AGENT_HUB_DISPLAY_NAME";
 /** Options accepted by ``resolveConfig`` / ``AgentHub.connect``. */
 export interface ResolveConfigOptions {
   user: string;
-  mode?: Mode;
   tenant?: string | null;
   displayName?: string | null;
   url?: string | null;
@@ -100,7 +91,6 @@ export function resolveConfig(options: ResolveConfigOptions): Config {
   return {
     user: options.user,
     displayName,
-    mode: options.mode ?? "stateful",
     tenant,
     url: url!,
     pat: pat!,

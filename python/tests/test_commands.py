@@ -63,7 +63,6 @@ def _config() -> Config:
     return Config(
         user="me",
         display_name=None,
-        mode="stateful",
         tenant=None,
         url="https://hub.example/mcp",
         pat="ghp_xxx",

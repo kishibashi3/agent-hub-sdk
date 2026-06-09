@@ -37,7 +37,6 @@ def config() -> Config:
     return Config(
         user="me",
         display_name="Tester",
-        mode="stateful",
         tenant=None,
         url="https://hub.example/mcp",
         pat="ghp_xxx",
@@ -53,7 +52,7 @@ def session(config: Config) -> HubSession:
 
 
 class TestRegister:
-    async def test_register_calls_tool_with_mode(
+    async def test_register_calls_tool_with_display_name(
         self, session: HubSession
     ) -> None:
         session._session.call_tool = AsyncMock(
@@ -63,7 +62,7 @@ class TestRegister:
         assert text == "registered: @me"
         session._session.call_tool.assert_awaited_once_with(
             "register",
-            {"name": "me", "display_name": "Tester", "mode": "stateful"},
+            {"name": "me", "display_name": "Tester"},
         )
 
     async def test_register_propagates_unknown_isError(
@@ -425,7 +424,6 @@ class TestAgentHubConnect:
 
         async with AgentHub.connect(
             user="alice",
-            mode="stateful",
             display_name="Alice the Bridge",
             url="https://hub.example/mcp",
             pat="ghp",
@@ -439,7 +437,6 @@ class TestAgentHubConnect:
             assert register_calls[0].args[1] == {
                 "name": "alice",
                 "display_name": "Alice the Bridge",
-                "mode": "stateful",
             }
 
     async def test_auto_register_display_name_falls_back_to_user(
@@ -452,14 +449,12 @@ class TestAgentHubConnect:
 
         async with AgentHub.connect(
             user="bob",
-            mode="stateless",
             url="https://hub.example/mcp",
             pat="ghp",
         ) as hub:
             calls = hub._session.call_tool.await_args_list
             register_call = next(c for c in calls if c.args[0] == "register")
             assert register_call.args[1]["display_name"] == "bob"
-            assert register_call.args[1]["mode"] == "stateless"
 
     async def test_connect_raises_when_auto_register_fails(
         self, monkeypatch: pytest.MonkeyPatch

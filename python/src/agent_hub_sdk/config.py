@@ -14,15 +14,10 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Literal
 
 from agent_hub_sdk.errors import ConfigurationError
 
-__all__ = ["Config", "Mode", "make_headers", "resolve_config"]
-
-#: Worker mode declared at register-time. ``stateful`` is the only mode
-#: supported in M1; ``stateless`` lands in M3 and ``global`` in M5.
-Mode = Literal["stateful", "stateless", "global"]
+__all__ = ["Config", "make_headers", "resolve_config"]
 
 
 @dataclass(frozen=True)
@@ -41,11 +36,6 @@ class Config:
     #: Optional human-readable role descriptor; surfaced in
     #: ``get_participants``. Defaults to ``user`` if not supplied.
     display_name: str | None
-
-    #: Worker-mode declaration. M1 only validates ``stateful``; other modes
-    #: are accepted by the schema (so M3/M5 implementations can land
-    #: incrementally) but currently behave the same as ``stateful``.
-    mode: Mode
 
     #: Tenant scope. ``None`` routes to the default tenant.
     tenant: str | None
@@ -77,7 +67,6 @@ ENV_CLIENT = "AGENT_HUB_CLIENT"
 def resolve_config(
     *,
     user: str,
-    mode: Mode = "stateful",
     tenant: str | None = None,
     display_name: str | None = None,
     url: str | None = None,
@@ -92,7 +81,6 @@ def resolve_config(
     :class:`~agent_hub_sdk.errors.ConfigurationError` immediately.
 
     :param user: SDK consumer's handle (without leading ``@``). Required.
-    :param mode: worker mode declared at register-time.
     :param tenant: tenant scope, or ``None`` for the default tenant.
     :param display_name: human-readable role descriptor.
     :param url: agent-hub MCP endpoint. Falls back to ``AGENT_HUB_URL``.
@@ -139,7 +127,6 @@ def resolve_config(
     return Config(
         user=user,
         display_name=resolved_display,
-        mode=mode,
         tenant=resolved_tenant,
         url=resolved_url,  # type: ignore[arg-type]
         pat=resolved_pat,  # type: ignore[arg-type]

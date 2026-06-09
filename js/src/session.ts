@@ -218,7 +218,6 @@ export class HubSession {
     const result = await this.client.callTool("register", {
       name: this.config.user,
       display_name: displayName,
-      mode: this.config.mode,
     });
     return raiseForToolError(result, "register");
   }

@@ -37,7 +37,6 @@ export {
   makeHeaders,
   resolveConfig,
   type Config,
-  type Mode,
   type ResolveConfigOptions,
 } from "./config.js";
 

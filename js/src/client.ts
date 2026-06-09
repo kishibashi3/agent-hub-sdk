@@ -19,14 +19,13 @@
 // to the server (= idempotent duplicate or explicit display-name
 // update).
 
-import type { Config, Mode, ResolveConfigOptions } from "./config.js";
+import type { Config, ResolveConfigOptions } from "./config.js";
 import { resolveConfig } from "./config.js";
 import { HubSession, type HubSessionHandle, type McpClientFactory } from "./session.js";
 
 /** Options to ``AgentHub.connect``. */
 export interface ConnectOptions {
   user: string;
-  mode?: Mode;
   tenant?: string | null;
   displayName?: string | null;
   url?: string | null;

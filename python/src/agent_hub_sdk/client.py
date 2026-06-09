@@ -41,7 +41,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from agent_hub_sdk.config import Mode, resolve_config
+from agent_hub_sdk.config import resolve_config
 from agent_hub_sdk.session import HubSession
 
 __all__ = ["AgentHub"]
@@ -62,7 +62,6 @@ class AgentHub:
         cls,
         *,
         user: str,
-        mode: Mode = "stateful",
         tenant: str | None = None,
         display_name: str | None = None,
         url: str | None = None,
@@ -74,16 +73,12 @@ class AgentHub:
         Resolves config, opens the MCP session via :class:`HubSession`,
         and calls :meth:`HubSession.register` automatically before
         yielding the handle (M5, issue #27). The ``register`` call
-        carries ``user`` as the handle, ``display_name`` (falling back
-        to ``user`` when not set), and the declared ``mode`` — so peers
-        immediately see this consumer in ``get_participants`` without
-        the bridge needing to remember a startup-time ``register()``.
+        carries ``user`` as the handle and ``display_name`` (falling
+        back to ``user`` when not set) — so peers immediately see this
+        consumer in ``get_participants`` without the bridge needing to
+        remember a startup-time ``register()``.
 
         :param user: SDK consumer's handle, without leading ``@``. Required.
-        :param mode: worker-mode declaration. ``stateful`` (default),
-            ``stateless`` (M3), or ``global``. All three are auto-registered
-            with the declared mode; the SDK does not differentiate at this
-            layer.
         :param tenant: tenant scope, or ``None`` for the default tenant.
         :param display_name: human-readable role descriptor; falls back to
             ``user`` if ``None``.
@@ -111,7 +106,6 @@ class AgentHub:
         """
         config = resolve_config(
             user=user,
-            mode=mode,
             tenant=tenant,
             display_name=display_name,
             url=url,

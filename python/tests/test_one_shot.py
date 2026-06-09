@@ -28,7 +28,6 @@ def _config(*, user: str = "me") -> Config:
     return Config(
         user=user,
         display_name=None,
-        mode="stateless",
         tenant=None,
         url="https://hub.example/mcp",
         pat="ghp_xxx",
@@ -102,7 +101,6 @@ class TestOneShotLifecycle:
         cfg = Config(
             user="translator",
             display_name="JP/EN translator",
-            mode="stateless",
             tenant="kaz",
             url="https://hub.example/mcp",
             pat="ghp_xyz",
@@ -123,7 +121,6 @@ class TestOneShotLifecycle:
         assert seen == [cfg]
         assert seen[0].user == "translator"
         assert seen[0].tenant == "kaz"
-        assert seen[0].mode == "stateless"
 
     async def test_cleanup_runs_on_normal_exit(
         self, monkeypatch: pytest.MonkeyPatch
@@ -258,7 +255,6 @@ class TestOneShotNested:
 
         async with AgentHub.connect(
             user="translator",
-            mode="stateless",
             url="https://hub.example/mcp",
             pat="ghp_xxx",
         ) as outer_hub:

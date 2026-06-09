@@ -4,6 +4,29 @@ All notable changes to `agent-hub-sdk` are recorded here. Format follows [Keep a
 
 Until `v1.0.0`, breaking changes between minor versions are possible. Each release tag (`vX.Y.Z` on `main`) corresponds to one section below.
 
+## [0.9.0] — 2026-06-09
+
+### Removed — `mode` argument from `register()` and `Config` (agent-hub issue #281) ⚠️ BREAKING
+
+Server-side (agent-hub PR #279) auto-determines worker mode from the `X-Agent-Hub-Client` header; passing `mode` to `register` was a no-op after that change (zod strict-strip). This release removes the now-misleading `mode` surface entirely.
+
+**Python:**
+- `Config.mode` field removed.
+- `resolve_config(mode=...)` argument removed.
+- `AgentHub.connect(mode=...)` argument removed.
+- `Mode` type alias removed from `agent_hub_sdk.config` and top-level `__all__`.
+- `HubSession.register()` no longer sends `mode` in the tool payload.
+
+**TypeScript:**
+- `Config.mode` property removed.
+- `ResolveConfigOptions.mode` option removed.
+- `ConnectOptions.mode` option removed.
+- `Mode` type removed from `config.ts` and top-level exports.
+- `HubSession.register()` no longer sends `mode` in the tool payload.
+- `package.json` version bumped from `0.7.0` to `0.9.0` (catch-up to Python + this breaking change).
+
+**Migration:** remove any `mode` argument from `AgentHub.connect()` / `resolve_config()` calls. Set `client_type` (added in v0.8.0) to let the server auto-determine mode from the `X-Agent-Hub-Client` header.
+
 ## [0.8.0] — 2026-06-09
 
 ### Added — `X-Agent-Hub-Client` header support via `client_type` (agent-hub issue #280)
