@@ -4,7 +4,7 @@ All notable changes to `agent-hub-sdk` are recorded here. Format follows [Keep a
 
 Until `v1.0.0`, breaking changes between minor versions are possible. Each release tag (`vX.Y.Z` on `main`) corresponds to one section below.
 
-## [Unreleased]
+## [0.8.0] — 2026-06-09
 
 ### Added — `X-Agent-Hub-Client` header support via `client_type` (agent-hub issue #280)
 
