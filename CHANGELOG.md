@@ -6,6 +6,15 @@ Until `v1.0.0`, breaking changes between minor versions are possible. Each relea
 
 ## [Unreleased]
 
+### Added — `X-Agent-Hub-Client` header support via `client_type` (agent-hub issue #280)
+
+- **`Config.client_type: str | None`** — new optional field. When set, `make_headers` emits `X-Agent-Hub-Client: <value>` in every MCP HTTP request so the server can auto-determine the worker mode from the client identity (agent-hub issue #276 / PR #279).
+- **`resolve_config`** accepts `client_type: str | None = None`; falls back to env var `AGENT_HUB_CLIENT`.
+- **`AgentHub.connect`** accepts `client_type: str | None = None`; forwards to `resolve_config`.
+- Typical values: `"agent-hub-bridge/claude"`, `"agent-hub-bridge/gemini"`, `"agent-hub-bridge/slack"`, `"agent-hub-bridge/a2a"`, `"agent-hub-client/codex"`, `"agent-hub-plugin/<user-id>"`.
+- Non-breaking: `client_type` defaults to `None` everywhere; header is silently omitted when unset (= same behaviour as before for any consumer that doesn't pass the value).
+- No existing test changes required — the 150 existing tests still pass.
+
 ### Added — TypeScript port of `hub.inbox()` + `hub.oneShot()` (issue #20)
 
 - **`HubSession.inbox(options?)`** async generator (TypeScript, M2 port): mirrors Python's `HubSession.inbox()` 1:1. Merges three concurrent producers (SSE push via `inboxPushes`, safety-net poll, liveness heartbeat) into a single `for await` loop. Options: `autoPong` (default `true` — intercept `/ping`, send `pong`, ack, drop), `pollIntervalMs` (default 30 000ms; overridable via `AGENT_HUB_INBOX_POLL_INTERVAL_S` env), `heartbeatIntervalMs` (default 60 000ms), `commands` (`CommandRouter | null`). Cancellation via `AbortController` — all three producers stop cleanly when the consumer `break`s or throws. In-flight dedup via `inFlightIds: Set<string>` prevents SSE replay double-yield (mirrors Python issue #31 fix). Private helpers `_drainInterceptingPing(autoPong)` and `_drainWithRouter(router)` mirror Python's `_drain_intercepting_ping` / `_drain_with_router`.

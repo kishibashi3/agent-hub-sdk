@@ -67,6 +67,7 @@ class AgentHub:
         display_name: str | None = None,
         url: str | None = None,
         pat: str | None = None,
+        client_type: str | None = None,
     ) -> AsyncIterator[HubSession]:
         """Open an agent-hub session and auto-register the consumer.
 
@@ -90,6 +91,9 @@ class AgentHub:
             Missing → :class:`~agent_hub_sdk.errors.ConfigurationError`.
         :param pat: GitHub PAT. Falls back to ``GITHUB_PAT``. Missing →
             :class:`~agent_hub_sdk.errors.ConfigurationError`.
+        :param client_type: ``X-Agent-Hub-Client`` header value (e.g.
+            ``"agent-hub-bridge/claude"``). Falls back to
+            ``AGENT_HUB_CLIENT`` env var. ``None`` → header omitted.
         :raises ConfigurationError: if ``url`` or ``pat`` cannot be
             resolved from args + environment. **No implicit default URL**
             — the SDK refuses to start rather than silently connecting to
@@ -112,6 +116,7 @@ class AgentHub:
             display_name=display_name,
             url=url,
             pat=pat,
+            client_type=client_type,
         )
         async with HubSession.open(config) as session:
             # Auto-register before yielding (M5, issue #27). If this
