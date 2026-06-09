@@ -96,7 +96,7 @@ describe("HubSession.oneShot — lifecycle", () => {
     await inner[Symbol.asyncDispose]();
   });
 
-  it("inner session carries the same Config (url, pat, tenant, user, mode)", async () => {
+  it("inner session carries the same Config (url, pat, tenant, participant, mode)", async () => {
     const cfg = mkConfig({
       participant: "translator",
       tenant: "kaz",

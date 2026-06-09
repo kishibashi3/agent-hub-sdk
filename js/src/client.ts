@@ -49,7 +49,7 @@ export interface ConnectOptions {
  * cleanup:
  *
  * ```ts
- * await using hub = await AgentHub.connect({ user: "my-bridge" });
+ * await using hub = await AgentHub.connect({ participant: "my-bridge" });
  * await hub.session.register();
  * // ...
  * // Implicit cleanup at scope exit.

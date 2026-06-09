@@ -23,7 +23,7 @@ import {
 
 function mkConfig(): Config {
   return {
-    user: "me",
+    participant: "me",
     displayName: null,
     mode: "stateful",
     tenant: null,

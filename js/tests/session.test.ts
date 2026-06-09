@@ -92,7 +92,7 @@ describe("HubSession.register", () => {
     ]);
   });
 
-  it("falls back to user when displayName is null", async () => {
+  it("falls back to participant when displayName is null", async () => {
     const { client, calls } = stubClient({
       toolResponses: {
         register: { content: [{ type: "text", text: "ok" }] },
@@ -454,7 +454,7 @@ describe("AgentHub.connect", () => {
     await handle[Symbol.asyncDispose]();
   });
 
-  it("M5: falls back display_name to user when not supplied", async () => {
+  it("M5: falls back display_name to participant when not supplied", async () => {
     const stub = stubClient({});
     const handle = await AgentHub.connect({
       participant: "bob",
