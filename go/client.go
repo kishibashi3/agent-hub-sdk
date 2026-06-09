@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -77,6 +78,38 @@ func WithHTTPTimeout(d time.Duration) ClientOption {
 	return func(c *Client) { c.httpClient.Timeout = d }
 }
 
+// WithTransport は httpClient / sseClient 両方の http.Transport を差し替える。
+// 主にテストや CI 環境でのカスタム transport 注入用 (モック transport を共有させる場合など)。
+// 本番環境では New() がそれぞれ独立した newTransport() を生成するため、
+// このオプションを呼ぶ必要はない。
+func WithTransport(t *http.Transport) ClientOption {
+	return func(c *Client) {
+		c.httpClient.Transport = t
+		c.sseClient.Transport = t
+	}
+}
+
+// newTransport は TCP keepalive を明示した per-client http.Transport を生成する。
+// http.DefaultTransport を共有しないことで接続プールを分離し、
+// ルーターに古い pooled connection を刈り取られる問題を防ぐ (issue #185)。
+//
+// KeepAlive: 30s — OS 側 TCP keepalive probe を 30 秒ごとに送信し NAT セッションを維持する。
+// IdleConnTimeout: 55s — ルーターの NAT idle timeout (一般的に 60〜300s) より短く設定し、
+// pool 内の dead connection を先回りして破棄する。
+func newTransport() *http.Transport {
+	dialer := &net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
+	return &http.Transport{
+		DialContext:         dialer.DialContext,
+		IdleConnTimeout:     55 * time.Second,
+		TLSHandshakeTimeout: 10 * time.Second,
+		MaxIdleConns:        10,
+		MaxIdleConnsPerHost: 2,
+	}
+}
+
 // New は新しい Client を生成する。Initialize() を呼ぶまで tools/call はできない。
 //
 // endpoint・pat・userID は必須パラメータ。空文字列を渡すとエラーを返す (fail-fast)。
@@ -97,8 +130,10 @@ func New(endpoint, pat, userID, tenantID string, opts ...ClientOption) (*Client,
 		userID:     userID,
 		tenantID:   tenantID,
 		clientName: defaultClientName,
-		httpClient: &http.Client{Timeout: 90 * time.Second},
-		sseClient:  &http.Client{Timeout: 0}, // long-lived SSE 接続 — タイムアウト無効
+		// httpClient と sseClient は接続プールを分離するため別インスタンスの Transport を使う。
+		// 共有すると sseClient の長寿命接続が httpClient の MaxIdleConns 枠を消費する。
+		httpClient: &http.Client{Timeout: 90 * time.Second, Transport: newTransport()},
+		sseClient:  &http.Client{Timeout: 0, Transport: newTransport()}, // long-lived SSE 接続 — タイムアウト無効
 	}
 	for _, o := range opts {
 		o(c)
