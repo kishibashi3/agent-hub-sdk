@@ -23,7 +23,7 @@ import {
 
 function mkConfig(overrides: Partial<Config> = {}): Config {
   return {
-    user: "me",
+    participant: "me",
     displayName: null,
     mode: "stateless",
     tenant: null,
@@ -98,7 +98,7 @@ describe("HubSession.oneShot — lifecycle", () => {
 
   it("inner session carries the same Config (url, pat, tenant, user, mode)", async () => {
     const cfg = mkConfig({
-      user: "translator",
+      participant: "translator",
       tenant: "kaz",
       mode: "stateless",
       url: "https://hub.example/mcp",
@@ -111,7 +111,7 @@ describe("HubSession.oneShot — lifecycle", () => {
     const inner = await outer.oneShot();
 
     expect(opens).toHaveLength(1);
-    expect(opens[0]?.user).toBe("translator");
+    expect(opens[0]?.participant).toBe("translator");
     expect(opens[0]?.tenant).toBe("kaz");
     expect(opens[0]?.mode).toBe("stateless");
     expect(opens[0]?.url).toBe("https://hub.example/mcp");
@@ -227,7 +227,7 @@ describe("HubSession.oneShot — nested inside AgentHub.connect", () => {
     const opens: Config[] = [];
 
     const handle = await AgentHub.connect({
-      user: "translator",
+      participant: "translator",
       url: "https://hub.example/mcp",
       pat: "ghp_xxx",
       env: {},
@@ -246,7 +246,7 @@ describe("HubSession.oneShot — nested inside AgentHub.connect", () => {
 
     // Both called with the same Config.
     expect(opens[0]).toEqual(opens[1]);
-    expect(opens[0]?.user).toBe("translator");
+    expect(opens[0]?.participant).toBe("translator");
 
     expect(innerHandle.session).not.toBe(handle.session);
 
@@ -258,7 +258,7 @@ describe("HubSession.oneShot — nested inside AgentHub.connect", () => {
     // oneShot is built on top of HubSession.open, which gets its Config
     // from AgentHub.connect. ConfigurationError still fires pre-factory.
     await expect(
-      AgentHub.connect({ user: "me", url: null, pat: null, env: {} }),
+      AgentHub.connect({ participant: "me", url: null, pat: null, env: {} }),
     ).rejects.toBeInstanceOf(ConfigurationError);
   });
 });

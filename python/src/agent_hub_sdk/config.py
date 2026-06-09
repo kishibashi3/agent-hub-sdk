@@ -31,10 +31,10 @@ class Config:
 
     #: Handle without the leading ``@`` (e.g. ``"my-bridge"``). The SDK
     #: prefixes ``@`` when calling tools that expect a handle.
-    user: str
+    participant: str
 
     #: Optional human-readable role descriptor; surfaced in
-    #: ``get_participants``. Defaults to ``user`` if not supplied.
+    #: ``get_participants``. Defaults to ``participant`` if not supplied.
     display_name: str | None
 
     #: Tenant scope. ``None`` routes to the default tenant.
@@ -66,7 +66,7 @@ ENV_CLIENT = "AGENT_HUB_CLIENT"
 
 def resolve_config(
     *,
-    user: str,
+    participant: str,
     tenant: str | None = None,
     display_name: str | None = None,
     url: str | None = None,
@@ -80,7 +80,7 @@ def resolve_config(
     default URL** — missing ``url`` or ``pat`` raises
     :class:`~agent_hub_sdk.errors.ConfigurationError` immediately.
 
-    :param user: SDK consumer's handle (without leading ``@``). Required.
+    :param participant: SDK consumer's handle (without leading ``@``). Required.
     :param tenant: tenant scope, or ``None`` for the default tenant.
     :param display_name: human-readable role descriptor.
     :param url: agent-hub MCP endpoint. Falls back to ``AGENT_HUB_URL``.
@@ -90,14 +90,14 @@ def resolve_config(
         env var.  ``None`` → header omitted.
     :param env: environment-variable lookup table for testing. Defaults to
         :data:`os.environ`.
-    :raises ConfigurationError: if ``user`` is empty, or if either ``url``
+    :raises ConfigurationError: if ``participant`` is empty, or if either ``url``
         or ``pat`` cannot be resolved from args + env.
     """
     env_map = os.environ if env is None else env
 
-    if not user:
+    if not participant:
         raise ConfigurationError(
-            "AgentHub.connect: 'user' is required and must be non-empty"
+            "AgentHub.connect: 'participant' is required and must be non-empty"
         )
 
     # ``or`` chains short-circuit to the first truthy value, or fall through
@@ -125,7 +125,7 @@ def resolve_config(
         )
 
     return Config(
-        user=user,
+        participant=participant,
         display_name=resolved_display,
         tenant=resolved_tenant,
         url=resolved_url,  # type: ignore[arg-type]
@@ -137,16 +137,16 @@ def resolve_config(
 def make_headers(config: Config) -> dict[str, str]:
     """Build the MCP HTTP headers for one :class:`Config`.
 
-    Authorization is the GitHub PAT as a bearer token; ``X-User-Id`` declares
-    the SDK consumer's handle; ``X-Tenant-Id`` is added only when a tenant is
-    set (the server treats the absence as the default tenant);
+    Authorization is the GitHub PAT as a bearer token; ``X-Participant-Id``
+    declares the SDK consumer's handle; ``X-Tenant-Id`` is added only when a
+    tenant is set (the server treats the absence as the default tenant);
     ``X-Agent-Hub-Client`` is added when ``config.client_type`` is set so the
     server can auto-determine the worker mode from the client identity (issue
     #276 / PR #279 of agent-hub).
     """
     headers = {
         "Authorization": f"Bearer {config.pat}",
-        "X-User-Id": config.user,
+        "X-Participant-Id": config.participant,
     }
     if config.tenant:
         headers["X-Tenant-Id"] = config.tenant

@@ -190,7 +190,7 @@ export class HubSession {
    *
    * **Independence**: the returned session has its own MCP client,
    * push queue, and status (starts at ``"idle"``). Only the immutable
-   * ``Config`` (URL, PAT, tenant, user, mode) is shared.
+   * ``Config`` (URL, PAT, tenant, participant, mode) is shared.
    *
    * **Mode-agnostic**: available on any session regardless of ``mode``.
    *
@@ -214,9 +214,9 @@ export class HubSession {
   // ------------------------------------------------------------------
 
   async register(): Promise<string> {
-    const displayName = this.config.displayName ?? this.config.user;
+    const displayName = this.config.displayName ?? this.config.participant;
     const result = await this.client.callTool("register", {
-      name: this.config.user,
+      name: this.config.participant,
       display_name: displayName,
     });
     return raiseForToolError(result, "register");
@@ -289,7 +289,7 @@ export class HubSession {
   }
 
   async subscribeInbox(): Promise<void> {
-    const inboxUri = `inbox://@${this.config.user}`;
+    const inboxUri = `inbox://@${this.config.participant}`;
     await this.client.subscribeResource(inboxUri);
   }
 

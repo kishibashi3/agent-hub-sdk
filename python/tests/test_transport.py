@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from mcp import types
 
-from agent_hub_sdk import HubTransientError, PeerNotFoundError
+from agent_hub_sdk import HubTransientError, ParticipantNotFoundError
 from agent_hub_sdk.transport import (
     extract_text,
     raise_for_send_error,
@@ -64,7 +64,7 @@ class TestRaiseForSendError:
 
     def test_peer_not_found_raises_peer_class(self) -> None:
         result = _text_result("宛先 @gemma は存在しません", is_error=True)
-        with pytest.raises(PeerNotFoundError) as exc_info:
+        with pytest.raises(ParticipantNotFoundError) as exc_info:
             raise_for_send_error(result, to="@gemma")
         assert exc_info.value.peer == "@gemma"
         assert "存在しません" in exc_info.value.detail
@@ -78,4 +78,4 @@ class TestRaiseForSendError:
         result = _text_result("policy violation: blocked", is_error=True)
         with pytest.raises(RuntimeError) as exc_info:
             raise_for_send_error(result, to="@gemma")
-        assert not isinstance(exc_info.value, (PeerNotFoundError, HubTransientError))
+        assert not isinstance(exc_info.value, (ParticipantNotFoundError, HubTransientError))

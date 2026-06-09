@@ -19,7 +19,7 @@ from agent_hub_sdk import (
     AgentHub,
     ConfigurationError,
     HubTransientError,
-    PeerNotFoundError,
+    ParticipantNotFoundError,
 )
 from agent_hub_sdk.config import Config
 from agent_hub_sdk.session import HubSession
@@ -35,7 +35,7 @@ def _text_result(text: str, *, is_error: bool = False) -> types.CallToolResult:
 @pytest.fixture
 def config() -> Config:
     return Config(
-        user="me",
+        participant="me",
         display_name="Tester",
         tenant=None,
         url="https://hub.example/mcp",
@@ -92,7 +92,7 @@ class TestSend:
                 "宛先 @gemma は存在しません", is_error=True
             )
         )
-        with pytest.raises(PeerNotFoundError) as exc_info:
+        with pytest.raises(ParticipantNotFoundError) as exc_info:
             await session.send("@gemma", "hi")
         assert exc_info.value.peer == "@gemma"
 
@@ -194,7 +194,7 @@ class TestSendWithRetry:
         async def fake_sleep(delay: float) -> None:
             slept.append(delay)
 
-        with pytest.raises(PeerNotFoundError):
+        with pytest.raises(ParticipantNotFoundError):
             await session.send_with_retry(
                 "@peer", "hi", sleep_fn=fake_sleep
             )
@@ -356,7 +356,7 @@ class TestAgentHubConnect:
         monkeypatch.delenv("AGENT_HUB_URL", raising=False)
         monkeypatch.delenv("GITHUB_PAT", raising=False)
         with pytest.raises(ConfigurationError):
-            async with AgentHub.connect(user="me", url=None, pat=None):
+            async with AgentHub.connect(participant="me", url=None, pat=None):
                 pass  # pragma: no cover — should never reach
 
     # M5 (issue #27): ``AgentHub.connect`` auto-registers the consumer
@@ -405,7 +405,7 @@ class TestAgentHubConnect:
                 mock_mcp.call_tool = AsyncMock(return_value=register_response)
             else:
                 mock_mcp.call_tool = AsyncMock(
-                    return_value=_text_result("registered: @" + config.user)
+                    return_value=_text_result("registered: @" + config.participant)
                 )
             session = HubSession(session=mock_mcp, config=config, notify_recv=recv)
             sessions_yielded.append(session)
@@ -423,7 +423,7 @@ class TestAgentHubConnect:
         _, sessions = self._build_open_patch(monkeypatch)
 
         async with AgentHub.connect(
-            user="alice",
+            participant="alice",
             display_name="Alice the Bridge",
             url="https://hub.example/mcp",
             pat="ghp",
@@ -448,7 +448,7 @@ class TestAgentHubConnect:
         self._build_open_patch(monkeypatch)
 
         async with AgentHub.connect(
-            user="bob",
+            participant="bob",
             url="https://hub.example/mcp",
             pat="ghp",
         ) as hub:
@@ -469,7 +469,7 @@ class TestAgentHubConnect:
         )
         with pytest.raises(HubTransientError, match="server unavailable"):
             async with AgentHub.connect(
-                user="carol",
+                participant="carol",
                 url="https://hub.example/mcp",
                 pat="ghp",
             ):
@@ -489,7 +489,7 @@ class TestAgentHubConnect:
         )
 
         async with AgentHub.connect(
-            user="dave",
+            participant="dave",
             url="https://hub.example/mcp",
             pat="ghp",
         ) as hub:

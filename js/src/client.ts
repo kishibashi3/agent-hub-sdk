@@ -7,7 +7,7 @@
 // explicit ``await hub.session.register()`` line at startup:
 //
 // ```ts
-// await using hub = await AgentHub.connect({ user: "my-bridge" });
+// await using hub = await AgentHub.connect({ participant: "my-bridge" });
 // // `register` already ran — go straight to work.
 // await hub.session.send("@peer", "hello");
 // ```
@@ -25,7 +25,7 @@ import { HubSession, type HubSessionHandle, type McpClientFactory } from "./sess
 
 /** Options to ``AgentHub.connect``. */
 export interface ConnectOptions {
-  user: string;
+  participant: string;
   tenant?: string | null;
   displayName?: string | null;
   url?: string | null;

@@ -4,7 +4,7 @@ This is the SDK's main entry point. The 2-line shape (M5):
 
 .. code-block:: python
 
-    async with AgentHub.connect(user="my-bridge", mode="stateful") as hub:
+    async with AgentHub.connect(participant="my-bridge", mode="stateful") as hub:
         # `register()` was already called automatically — go straight to work.
         await hub.send("@peer", "hello")
 
@@ -61,7 +61,7 @@ class AgentHub:
     async def connect(
         cls,
         *,
-        user: str,
+        participant: str,
         tenant: str | None = None,
         display_name: str | None = None,
         url: str | None = None,
@@ -73,15 +73,15 @@ class AgentHub:
         Resolves config, opens the MCP session via :class:`HubSession`,
         and calls :meth:`HubSession.register` automatically before
         yielding the handle (M5, issue #27). The ``register`` call
-        carries ``user`` as the handle and ``display_name`` (falling
-        back to ``user`` when not set) — so peers immediately see this
+        carries ``participant`` as the handle and ``display_name`` (falling
+        back to ``participant`` when not set) — so peers immediately see this
         consumer in ``get_participants`` without the bridge needing to
         remember a startup-time ``register()``.
 
-        :param user: SDK consumer's handle, without leading ``@``. Required.
+        :param participant: SDK consumer's handle, without leading ``@``. Required.
         :param tenant: tenant scope, or ``None`` for the default tenant.
         :param display_name: human-readable role descriptor; falls back to
-            ``user`` if ``None``.
+            ``participant`` if ``None``.
         :param url: agent-hub MCP endpoint. Falls back to ``AGENT_HUB_URL``.
             Missing → :class:`~agent_hub_sdk.errors.ConfigurationError`.
         :param pat: GitHub PAT. Falls back to ``GITHUB_PAT``. Missing →
@@ -105,7 +105,7 @@ class AgentHub:
         explicit ``display_name`` update if the field changed).
         """
         config = resolve_config(
-            user=user,
+            participant=participant,
             tenant=tenant,
             display_name=display_name,
             url=url,

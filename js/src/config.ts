@@ -20,7 +20,7 @@ import { ConfigurationError } from "./errors.js";
  */
 export interface Config {
   /** Handle without the leading ``@``. */
-  readonly user: string;
+  readonly participant: string;
   /** Human-readable role descriptor; null if unspecified. */
   readonly displayName: string | null;
   /** Tenant scope. ``null`` routes to the default tenant. */
@@ -41,7 +41,7 @@ export const ENV_DISPLAY_NAME = "AGENT_HUB_DISPLAY_NAME";
 
 /** Options accepted by ``resolveConfig`` / ``AgentHub.connect``. */
 export interface ResolveConfigOptions {
-  user: string;
+  participant: string;
   tenant?: string | null;
   displayName?: string | null;
   url?: string | null;
@@ -60,9 +60,9 @@ export interface ResolveConfigOptions {
 export function resolveConfig(options: ResolveConfigOptions): Config {
   const env = options.env ?? (process.env as Record<string, string | undefined>);
 
-  if (!options.user) {
+  if (!options.participant) {
     throw new ConfigurationError(
-      "AgentHub.connect: 'user' is required and must be non-empty",
+      "AgentHub.connect: 'participant' is required and must be non-empty",
     );
   }
 
@@ -89,7 +89,7 @@ export function resolveConfig(options: ResolveConfigOptions): Config {
   }
 
   return {
-    user: options.user,
+    participant: options.participant,
     displayName,
     tenant,
     url: url!,
@@ -100,7 +100,7 @@ export function resolveConfig(options: ResolveConfigOptions): Config {
 /**
  * Build the MCP HTTP headers for one ``Config``.
  *
- * Authorization is the GitHub PAT as a bearer token; ``X-User-Id``
+ * Authorization is the GitHub PAT as a bearer token; ``X-Participant-Id``
  * declares the SDK consumer's handle; ``X-Tenant-Id`` is added only
  * when a tenant is set (the server treats absence as the default
  * tenant).
@@ -108,7 +108,7 @@ export function resolveConfig(options: ResolveConfigOptions): Config {
 export function makeHeaders(config: Config): Record<string, string> {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${config.pat}`,
-    "X-User-Id": config.user,
+    "X-Participant-Id": config.participant,
   };
   if (config.tenant) {
     headers["X-Tenant-Id"] = config.tenant;

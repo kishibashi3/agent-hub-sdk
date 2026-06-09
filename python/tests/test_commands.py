@@ -61,7 +61,7 @@ class TestParseCommand:
 
 def _config() -> Config:
     return Config(
-        user="me",
+        participant="me",
         display_name=None,
         tenant=None,
         url="https://hub.example/mcp",

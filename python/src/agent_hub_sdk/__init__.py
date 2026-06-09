@@ -5,13 +5,13 @@ roadmap and ``CHANGELOG.md`` for what's landed.
 
 Typical usage::
 
-    from agent_hub_sdk import AgentHub, PeerNotFoundError, HubTransientError
+    from agent_hub_sdk import AgentHub, ParticipantNotFoundError, HubTransientError
 
-    async with AgentHub.connect(user="my-bridge") as hub:
+    async with AgentHub.connect(participant="my-bridge") as hub:
         await hub.register()
         try:
             await hub.send("@peer", "hello")
-        except PeerNotFoundError:
+        except ParticipantNotFoundError:
             ...
         except HubTransientError:
             ...
@@ -35,7 +35,7 @@ from agent_hub_sdk.errors import (
     ConfigurationError,
     HubErrorKind,
     HubTransientError,
-    PeerNotFoundError,
+    ParticipantNotFoundError,
     classify_hub_error,
 )
 from agent_hub_sdk.messages import IncomingMessage, Participant
@@ -54,7 +54,7 @@ __all__ = [
     "HubTransientError",
     "IncomingMessage",
     "Participant",
-    "PeerNotFoundError",
+    "ParticipantNotFoundError",
     "RestartHandler",
     "__version__",
     "classify_hub_error",
