@@ -31,10 +31,12 @@ const (
 //   - initialize + notifications/initialized (セッション確立)
 //   - tools/call: register / get_messages / mark_as_read / send_message
 //   - GET /mcp SSE ストリーム: サーバー ping に自動応答 (issue #41)
+//   - resources/subscribe: inbox push 購読 (issue #46)
 //
 // SSE 対応:
 //   - tools/call の応答は JSON または text/event-stream のどちらも受け取る。
 //   - StartSSE() で GET /mcp の long-lived connection を開き ping に応答する。
+//   - SubscribeInbox() で inbox://@handle を購読し、push で OnInboxPush コールバックを呼ぶ。
 //
 // # Concurrency
 //
@@ -47,6 +49,7 @@ const (
 // 保持するため、main goroutine の sessionID アクセスと競合しない。
 // sendPong は sseClient (Timeout=0 専用クライアント) を使い、
 // main goroutine の httpClient 呼び出しと独立して並列動作する。
+// inboxCallback は callbackMu で保護され、SSE goroutine からも安全に読める。
 type Client struct {
 	endpoint   string
 	pat        string
@@ -57,10 +60,12 @@ type Client struct {
 	reqIDSeq   atomic.Int64
 	httpClient *http.Client
 	// sseClient は SSE ストリーム (GET /mcp) 専用クライアント (Timeout=0 = long-lived)。
-	sseClient *http.Client
-	sseMu     sync.Mutex // sseCancel / sseDone を保護する
-	sseCancel context.CancelFunc
-	sseDone   <-chan struct{}
+	sseClient     *http.Client
+	sseMu         sync.Mutex // sseCancel / sseDone を保護する
+	sseCancel     context.CancelFunc
+	sseDone       <-chan struct{}
+	callbackMu    sync.Mutex // inboxCallback を保護する
+	inboxCallback func()
 }
 
 // ClientOption は Client の追加設定を行うオプション関数。
@@ -221,6 +226,36 @@ func (c *Client) SendMessage(ctx context.Context, to, body, causedBy string) err
 		return fmt.Errorf("send_message to %s: %w", to, err)
 	}
 	return nil
+}
+
+// SubscribeInbox は inbox://@<handle> を resources/subscribe で購読する。
+// これにより agent-hub サーバーは is_online = true に更新する。
+// Initialize() → StartSSE() の後に呼ぶこと。
+func (c *Client) SubscribeInbox(ctx context.Context) error {
+	params := map[string]any{
+		"uri": fmt.Sprintf("inbox://@%s", c.userID),
+	}
+	data, err := c.postRPC(ctx, "resources/subscribe", params, false)
+	if err != nil {
+		return fmt.Errorf("SubscribeInbox: %w", err)
+	}
+	var rpc rpcResponse
+	if err := json.Unmarshal(data, &rpc); err != nil {
+		return fmt.Errorf("SubscribeInbox: unmarshal: %w", err)
+	}
+	if rpc.Error != nil {
+		return fmt.Errorf("SubscribeInbox: rpc error %d: %s", rpc.Error.Code, rpc.Error.Message)
+	}
+	return nil
+}
+
+// OnInboxPush は inbox push 受信時に呼ばれるコールバックを登録する。
+// bridge はこのコールバックで GetMessages() をトリガーできる。
+// 複数回呼ぶと最後の登録で上書きされる。goroutine-safe。
+func (c *Client) OnInboxPush(fn func()) {
+	c.callbackMu.Lock()
+	c.inboxCallback = fn
+	c.callbackMu.Unlock()
 }
 
 // ──────────────────────────────────────────────────────────────────────── //
@@ -484,13 +519,22 @@ func (c *Client) runSSELoop(ctx context.Context, sid string) error {
 
 // handleSSEEvent は 1 つの SSE データブロックを処理する。
 // ping リクエストを受け取った場合は pong を返す。
+// notifications/resources/updated を受信した場合は登録済みコールバックを goroutine で呼ぶ。
 func (c *Client) handleSSEEvent(ctx context.Context, sid string, data []byte) {
 	var msg pingMessage
 	if err := json.Unmarshal(data, &msg); err != nil {
 		return
 	}
-	if msg.Method == "ping" {
+	switch msg.Method {
+	case "ping":
 		c.sendPong(ctx, sid, msg.ID)
+	case "notifications/resources/updated":
+		c.callbackMu.Lock()
+		fn := c.inboxCallback
+		c.callbackMu.Unlock()
+		if fn != nil {
+			go fn()
+		}
 	}
 }
 
