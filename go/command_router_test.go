@@ -38,47 +38,8 @@ func TestParseCommand(t *testing.T) {
 	}
 }
 
-// ── stub client / message helpers ────────────────────────────────────────────
-
-// stubSentMsg は SendMessage で記録された送信。
-type stubSentMsg struct {
-	to       string
-	body     string
-	causedBy string
-}
-
-// stubClient は CommandRouter テスト用のスタブ。
-// 実際の HTTP 接続を行わず、呼び出しをキャプチャする。
-type stubClient struct {
-	sentMessages []stubSentMsg
-	markedRead   []string
-}
-
-func newStubClient() *stubClient { return &stubClient{} }
-
-func (s *stubClient) recordSend(to, body, causedBy string) {
-	s.sentMessages = append(s.sentMessages, stubSentMsg{to, body, causedBy})
-}
-func (s *stubClient) recordAck(id string) {
-	s.markedRead = append(s.markedRead, id)
-}
-
-func newMsg(id, sender, body string) agenthub.Message {
-	return agenthub.Message{
-		ID:        id,
-		Sender:    sender,
-		To:        "@bridge",
-		Body:      body,
-		Timestamp: "2026-06-07T00:00:00.000Z",
-	}
-}
-
-// ── commandRouter テスト用サブタイプ ─────────────────────────────────────────
-//
-// CommandRouter は実 Client を受け取るが、テストでは HTTP 呼び出しが必要なため
-// Monkey-patch する代わりに、CommandHandler の引数 client を使わない形でテストする。
-// 実際の SendMessage / MarkAsRead 呼び出しは integration test 相当なので
-// ここでは CommandRouter のロジック (ParseCommand + dispatch + 戻り値) のみを確認する。
+// ── CommandRouter のロジック (ParseCommand + dispatch + 戻り値) のみを確認する。
+// 実際の SendMessage / MarkAsRead 呼び出しは integration test 相当のため省略。
 
 // TestCommandRouter_ParseDispatch は Handle の dispatch ロジックをテストする。
 // 実 Client への通信は発生しない形でテストするため、カスタムハンドラの
