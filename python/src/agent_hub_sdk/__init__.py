@@ -36,6 +36,7 @@ from agent_hub_sdk.errors import (
     HubErrorKind,
     HubTransientError,
     ParticipantNotFoundError,
+    PeerNotFoundError,
     classify_hub_error,
 )
 from agent_hub_sdk.messages import IncomingMessage, Participant
@@ -55,6 +56,7 @@ __all__ = [
     "IncomingMessage",
     "Participant",
     "ParticipantNotFoundError",
+    "PeerNotFoundError",
     "RestartHandler",
     "__version__",
     "classify_hub_error",

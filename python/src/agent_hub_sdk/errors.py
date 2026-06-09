@@ -28,6 +28,7 @@ __all__ = [
     "HubErrorKind",
     "HubTransientError",
     "ParticipantNotFoundError",
+    "PeerNotFoundError",
     "classify_hub_error",
 ]
 
@@ -71,6 +72,10 @@ class HubTransientError(RuntimeError):
 
 
 HubErrorKind = Literal["participant_not_found", "transient", "unknown"]
+
+# Backward-compat alias: bridges imported PeerNotFoundError before SDK #52 rename.
+# Keep until bridges are migrated to ParticipantNotFoundError.
+PeerNotFoundError = ParticipantNotFoundError
 
 # Patterns for "peer not found" / "peer offline" agent-hub error strings.
 # Includes both English and Japanese because the production server returns
