@@ -353,7 +353,7 @@ func (c *Client) postRPC(ctx context.Context, method string, params any, isNotif
 	req.Header.Set("Content-Type", jsonContentType)
 	req.Header.Set("Accept", jsonContentType+", "+sseContentType)
 	req.Header.Set("Authorization", "Bearer "+c.pat)
-	req.Header.Set("X-User-Id", c.userID)
+	req.Header.Set("X-Participant-Id", c.userID)
 	if c.tenantID != "" {
 		req.Header.Set("X-Tenant-Id", c.tenantID)
 	}
@@ -473,7 +473,7 @@ func (c *Client) runSSELoop(ctx context.Context, sid string) error {
 	}
 	req.Header.Set("Accept", sseContentType)
 	req.Header.Set("Authorization", "Bearer "+c.pat)
-	req.Header.Set("X-User-Id", c.userID)
+	req.Header.Set("X-Participant-Id", c.userID)
 	if c.tenantID != "" {
 		req.Header.Set("X-Tenant-Id", c.tenantID)
 	}
@@ -566,7 +566,7 @@ func (c *Client) sendPong(ctx context.Context, sid string, id json.RawMessage) {
 	req.Header.Set("Content-Type", jsonContentType)
 	req.Header.Set("Accept", jsonContentType+", "+sseContentType)
 	req.Header.Set("Authorization", "Bearer "+c.pat)
-	req.Header.Set("X-User-Id", c.userID)
+	req.Header.Set("X-Participant-Id", c.userID)
 	if c.tenantID != "" {
 		req.Header.Set("X-Tenant-Id", c.tenantID)
 	}
