@@ -4,6 +4,30 @@ All notable changes to `agent-hub-sdk` are recorded here. Format follows [Keep a
 
 Until `v1.0.0`, breaking changes between minor versions are possible. Each release tag (`vX.Y.Z` on `main`) corresponds to one section below.
 
+## [0.10.0] — 2026-09-12
+
+### Fixed — `mcp` dependency upper bound (issue #57) P0
+
+`pyproject.toml` pinned `mcp>=1.0` with no upper bound. Upstream `mcp` 2.0.0
+removed the deprecated `streamablehttp_client` alias in
+`mcp.client.streamable_http` (renamed to `streamable_http_client` around
+1.25.0, alias kept through 1.30.0, then dropped in 2.0.0). `agent_hub_sdk.session`
+still imports the old alias, so any fresh install resolving `mcp>=2.0` broke
+with `ImportError: cannot import name 'streamablehttp_client'`. This is how
+`agent-hub-bridges` PR #259's CI caught it — the PR itself was unrelated
+(doc/version-only diff); the SDK's own dependency had drifted.
+
+**Fix chosen: pin upper bound (`mcp>=1.0,<2.0`)**, not API migration. All
+known consumers (bridge-slack, bridge-claude, bridge-gemini, bridge-a2a)
+already run against `mcp` 1.x (locked at `1.27.1` in `python/uv.lock`), so
+this restores the working import without touching any consumer's floor or
+requiring a code change to `session.py`. Revisit alongside a real `mcp` 2.x
+migration (new API, `streamable_http_client` rename, breaking behavior
+changes upstream) as its own tracked change.
+
+- `python/pyproject.toml`: `mcp>=1.0` → `mcp>=1.0,<2.0`.
+- No code changes; `agent_hub_sdk/session.py` import unchanged.
+
 ## [0.9.0] — 2026-06-09
 
 ### Removed — `mode` argument from `register()` and `Config` (agent-hub issue #281) ⚠️ BREAKING
