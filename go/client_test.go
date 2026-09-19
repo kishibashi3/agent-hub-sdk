@@ -1,10 +1,14 @@
 package agenthub_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -251,4 +255,215 @@ func TestOnInboxPush_noCallbackNoPanic(t *testing.T) {
 
 	// 短時間待って panic がないことを確認
 	time.Sleep(200 * time.Millisecond)
+}
+
+// ──────────────────────────────────────────────────────────────────────── //
+// SSE 行長: 上限なしで読み切れること (issue #60)                           //
+// ──────────────────────────────────────────────────────────────────────── //
+
+// newBigGetMessagesServer は get_messages に対して body が bodyBytes バイトの
+// メッセージ 1 件を SSE (1 行の data) で返すテストサーバを生成する。
+func newBigGetMessagesServer(t *testing.T, bodyBytes int) *httptest.Server {
+	t.Helper()
+	var reqCount atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("mcp-session-id", "test-session-id")
+
+		var req struct {
+			Method string `json:"method"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		n := reqCount.Add(1)
+
+		switch req.Method {
+		case "initialize":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"test","version":"0.0.1"}}}`, n)
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		default:
+			payload, err := json.Marshal([]map[string]string{{
+				"id":      "big1",
+				"from":    "@alice",
+				"to":      "@bridge-test",
+				"message": strings.Repeat("x", bodyBytes),
+			}})
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			inner, err := json.Marshal(string(payload))
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":%d,\"result\":{\"content\":[{\"type\":\"text\",\"text\":%s}]}}\n\n", n, inner)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func fetchOneBigMessage(t *testing.T, bodyBytes int) agenthub.Message {
+	t.Helper()
+	srv := newBigGetMessagesServer(t, bodyBytes)
+
+	c, err := agenthub.New(srv.URL, "ghp_test", "bridge-test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+	if err := c.Initialize(ctx); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	msgs, err := c.GetMessages(ctx)
+	if err != nil {
+		t.Fatalf("GetMessages: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("want 1 message, got %d", len(msgs))
+	}
+	return msgs[0]
+}
+
+// 旧実装 (bufio.Scanner + 128 KiB 固定上限) では "token too long" で恒久的に
+// 受信不能になっていたサイズが読めること。
+func TestGetMessages_largeResponseAboveOldScannerLimit(t *testing.T) {
+	const bodyBytes = 512 * 1024 // 旧上限 128 KiB の 4 倍
+	msg := fetchOneBigMessage(t, bodyBytes)
+	if len(msg.Body) != bodyBytes {
+		t.Errorf("body length: want %d, got %d", bodyBytes, len(msg.Body))
+	}
+}
+
+// WARN 閾値を超えた行も読み切れること + 受信サイズが数値で WARN に出ること。
+// 上限を外した以上「巨大化していること自体に誰も気づかない」を防ぐのが目的。
+func TestGetMessages_oversizedLineIsReadAndWarned(t *testing.T) {
+	const bodyBytes = 2 << 20 // WARN 閾値 (1 MiB) 超え
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	msg := fetchOneBigMessage(t, bodyBytes)
+	if len(msg.Body) != bodyBytes {
+		t.Errorf("body length: want %d, got %d", bodyBytes, len(msg.Body))
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "level=WARN") || !strings.Contains(logged, "oversized line received") {
+		t.Fatalf("want a WARN about the oversized line, got:\n%s", logged)
+	}
+	// 受信サイズが数値で出ていること (行全体なので body より必ず大きい)
+	m := regexp.MustCompile(`bytes=(\d+)`).FindStringSubmatch(logged)
+	if m == nil {
+		t.Fatalf("WARN should report the received size as a number, got:\n%s", logged)
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n < bodyBytes {
+		t.Errorf("reported size %d should be >= body size %d", n, bodyBytes)
+	}
+}
+
+// 閾値以下の通常サイズでは WARN を出さない (ログを汚さない)。
+func TestGetMessages_normalSizeIsNotWarned(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	fetchOneBigMessage(t, 1024)
+
+	if strings.Contains(buf.String(), "oversized line") {
+		t.Errorf("unexpected WARN for a normal-sized response:\n%s", buf.String())
+	}
+}
+
+// 最終行が改行で終わらずに EOF になっても、その行を取りこぼさないこと。
+// bufio.Reader.ReadString は最後の断片を err=io.EOF と一緒に返すため、
+// 「err != nil なら捨てる」実装だとレスポンスを丸ごと落とす。
+func TestGetMessages_lastLineWithoutTrailingNewline(t *testing.T) {
+	var reqCount atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("mcp-session-id", "test-session-id")
+		var req struct {
+			Method string `json:"method"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		n := reqCount.Add(1)
+		switch req.Method {
+		case "initialize":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"test","version":"0.0.1"}}}`, n)
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		default:
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			// 末尾に改行なし
+			fmt.Fprintf(w, "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":%d,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"[{\\\"id\\\":\\\"nl1\\\",\\\"from\\\":\\\"@alice\\\",\\\"to\\\":\\\"@bridge-test\\\",\\\"message\\\":\\\"no trailing newline\\\"}]\"}]}}", n)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := agenthub.New(srv.URL, "ghp_test", "bridge-test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+	if err := c.Initialize(ctx); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	msgs, err := c.GetMessages(ctx)
+	if err != nil {
+		t.Fatalf("GetMessages: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].ID != "nl1" {
+		t.Fatalf("unexpected messages: %+v", msgs)
+	}
+}
+
+// 常時 SSE ストリーム側 (runSSELoop) も同じ地雷を踏まないこと:
+// 旧上限を超える大きさの 1 イベントでも push コールバックが発火する。
+func TestSSEStream_largeEventStillDispatches(t *testing.T) {
+	sseCh := make(chan string, 1)
+	srv := newTestServer(t, sseCh)
+
+	c, err := agenthub.New(srv.URL, "ghp_test", "bridge-test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	var fired atomic.Bool
+	c.OnInboxPush(func() {
+		if fired.CompareAndSwap(false, true) {
+			close(done)
+		}
+	})
+
+	ctx := t.Context()
+	if err := c.Initialize(ctx); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	if err := c.StartSSE(ctx); err != nil {
+		t.Fatalf("StartSSE: %v", err)
+	}
+	t.Cleanup(c.StopSSE)
+
+	// 旧上限 (128 KiB) を大きく超える 1 行のイベント
+	padding := strings.Repeat("y", 512*1024)
+	sseCh <- fmt.Sprintf(`{"jsonrpc":"2.0","method":"notifications/resources/updated","params":{"uri":"inbox://@bridge-test","pad":"%s"}}`, padding)
+	close(sseCh)
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout: large SSE event did not reach the callback")
+	}
 }

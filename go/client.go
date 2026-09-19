@@ -5,8 +5,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -23,6 +25,26 @@ const (
 
 	defaultClientName    = "agent-hub-sdk-go"
 	defaultClientVersion = "0.1.0"
+
+	// sseReaderBufBytes は SSE 行読み取り用 bufio.Reader の初期バッファサイズ。
+	// これは上限ではない。1 行がこれを超えても ReadString が必要なだけ確保して
+	// 読み切る (issue #60)。定常状態のメッセージがほぼ収まるサイズにしてあり、
+	// 大きい行を読むときだけ一時的にメモリを追加で使う。
+	sseReaderBufBytes = 64 * 1024
+
+	// sseLineWarnBytes は「異常に大きい行を受け取った」と判断して WARN を出す閾値。
+	//
+	// 上限を撤廃した以上、行が巨大化していること自体に誰も気づかない状態になりうる
+	// (issue #60 では 128 KiB の固定上限を超えた時点で読めなくなり、しかも
+	// "token too long" としか出なかったため切り分けに時間がかかった)。
+	// 読み出しは続行したうえで、実サイズを数値でログに残す。
+	//
+	// 1 MiB は観測済みの backlog から決めた分界点。二重 JSON エンコード
+	// (messages 配列 → JSON → MCP content[].text → SSE data: 1 行) を踏まえると
+	// 未読 1043 件 (@admin 実績 / body 1 KiB 想定) で約 1.4 MiB に達する一方、
+	// 未読 72 件 (@planner 実績 / body 2 KiB 想定) は約 0.18 MiB に収まる。
+	// 実機のレスポンスサイズが実測できたら、その値を根拠に置き直す。
+	sseLineWarnBytes = 1 << 20 // 1 MiB
 )
 
 // Client は agent-hub MCP エンドポイントとの接続を管理する。
@@ -490,31 +512,34 @@ func (c *Client) runSSELoop(ctx context.Context, sid string) error {
 		return fmt.Errorf("SSE GET HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 128*1024), 128*1024)
+	lr := newSSELineReader(resp.Body)
 
 	var dataLines []string
-	for scanner.Scan() {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		line := scanner.Text()
-		if line == "" {
-			if len(dataLines) > 0 {
-				c.handleSSEEvent(ctx, sid, []byte(strings.Join(dataLines, "\n")))
-				dataLines = dataLines[:0]
+	for {
+		line, readErr := lr.ReadLine()
+		if readErr == nil || line != "" {
+			if ctx.Err() != nil {
+				return ctx.Err()
 			}
-		} else if strings.HasPrefix(line, "data:") {
-			dataLines = append(dataLines, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			if line == "" {
+				if len(dataLines) > 0 {
+					c.handleSSEEvent(ctx, sid, []byte(strings.Join(dataLines, "\n")))
+					dataLines = dataLines[:0]
+				}
+			} else if strings.HasPrefix(line, "data:") {
+				dataLines = append(dataLines, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			}
+		}
+		if readErr != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if errors.Is(readErr, io.EOF) {
+				return io.EOF
+			}
+			return fmt.Errorf("SSE read: %w", readErr)
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		return fmt.Errorf("SSE scan: %w", err)
-	}
-	return io.EOF
 }
 
 // handleSSEEvent は 1 つの SSE データブロックを処理する。
@@ -582,33 +607,73 @@ func (c *Client) sendPong(ctx context.Context, sid string, id json.RawMessage) {
 
 // ──────────────────────────────────────────────────────────────────────── //
 
+// sseLineReader は SSE ストリームを行単位で読む。
+//
+// bufio.Scanner ではなく bufio.Reader + ReadString('\n') を使うのは、
+// Scanner が「1 行の最大長」を持ち、超えると ErrTooLong ("token too long") で
+// 打ち切るため (issue #60)。agent-hub の get_messages は未読を全件・body 込みで
+// 1 イベントに詰めて返すので、行長は未読件数に比例して無制限に伸びる。
+// 一度上限を超えると読めない → mark_as_read できない → 未読が増える →
+// さらに読めない、という自己強化する livelock になり自然回復しない。
+// ReadString は上限を持たず必要なだけ確保して読み切るので、この失敗モード自体が消える。
+type sseLineReader struct {
+	br *bufio.Reader
+}
+
+func newSSELineReader(r io.Reader) *sseLineReader {
+	return &sseLineReader{br: bufio.NewReaderSize(r, sseReaderBufBytes)}
+}
+
+// ReadLine は次の 1 行を行末の改行を除いて返す。
+//
+// 行長に上限はない。sseLineWarnBytes を超えた行は実サイズを WARN でログに出したうえで
+// そのまま返す (読み出しは続行する)。
+// ストリーム終端では最後の断片 (改行で終わっていない行) を返しつつ io.EOF を返すため、
+// 呼び出し側は「err != nil でも line が空でなければ処理する」こと。
+func (lr *sseLineReader) ReadLine() (string, error) {
+	line, err := lr.br.ReadString('\n')
+	if n := len(line); n >= sseLineWarnBytes {
+		slog.Warn("[sse] oversized line received — reading it anyway",
+			"bytes", n,
+			"warn_threshold_bytes", sseLineWarnBytes,
+			"hint", "get_messages returns every unread message in one response; a growing line means a growing unread backlog (issue #60)")
+	}
+	line = strings.TrimSuffix(line, "\n")
+	line = strings.TrimSuffix(line, "\r")
+	return line, err
+}
+
 // readFirstSSEData は SSE ストリームから最初のイベントの data を返す。
 // agent-hub の tools/call は 1 件のレスポンスしか送らないのでこれで十分。
 func readFirstSSEData(r io.Reader) ([]byte, error) {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 128*1024), 128*1024)
+	lr := newSSELineReader(r)
 
 	var dataLines []string
 	inEvent := false
 
-	for scanner.Scan() {
-		line := scanner.Text()
-		switch {
-		case line == "":
-			if inEvent && len(dataLines) > 0 {
-				return []byte(strings.Join(dataLines, "\n")), nil
+	for {
+		line, readErr := lr.ReadLine()
+		if readErr == nil || line != "" {
+			switch {
+			case line == "":
+				if inEvent && len(dataLines) > 0 {
+					return []byte(strings.Join(dataLines, "\n")), nil
+				}
+				dataLines = dataLines[:0]
+				inEvent = false
+			case strings.HasPrefix(line, "event:"):
+				inEvent = true
+			case strings.HasPrefix(line, "data:"):
+				inEvent = true
+				dataLines = append(dataLines, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
 			}
-			dataLines = dataLines[:0]
-			inEvent = false
-		case strings.HasPrefix(line, "event:"):
-			inEvent = true
-		case strings.HasPrefix(line, "data:"):
-			inEvent = true
-			dataLines = append(dataLines, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
 		}
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("SSE scan: %w", err)
+		if readErr != nil {
+			if !errors.Is(readErr, io.EOF) {
+				return nil, fmt.Errorf("SSE read: %w", readErr)
+			}
+			break
+		}
 	}
 	if len(dataLines) > 0 {
 		return []byte(strings.Join(dataLines, "\n")), nil
