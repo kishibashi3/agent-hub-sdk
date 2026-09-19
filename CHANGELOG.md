@@ -4,6 +4,42 @@ All notable changes to `agent-hub-sdk` are recorded here. Format follows [Keep a
 
 Until `v1.0.0`, breaking changes between minor versions are possible. Each release tag (`vX.Y.Z` on `main`) corresponds to one section below.
 
+## [Unreleased]
+
+### Fixed — Go SDK: SSE scanner's fixed 128 KiB limit made `get_messages` permanently unreadable (issue #60) P0
+
+`go/client.go` read SSE with `bufio.Scanner` capped at a hardcoded 128 KiB in
+two places (`runSSELoop`, `readFirstSSEData`). `readFirstSSEData` is the only
+read path for any `tools/call` that comes back as `text/event-stream`, so the
+cap applied to every tool call; `get_messages` hit it first simply because it
+returns the largest response — the hub has no `limit` / paging and serialises
+every unread message, bodies included, into one response.
+
+Once that response crossed 128 KiB the scanner aborted with
+`bufio.Scanner: token too long` and the client was stuck **permanently**:
+unreadable response → cannot `mark_as_read` → unread count grows → even less
+readable. A self-reinforcing livelock with no natural recovery. Observed on
+`@planner` (2026-09-20, 42 occurrences in 500 log lines, reconnecting every
+5–10s at `queue_depth=72`), and previously on `bridge-ntv-planner`
+(73,006 occurrences over 2026-08-05…08-25, unnoticed for over a month).
+
+- Default limit raised 128 KiB → **8 MiB**, overridable via
+  `AGENT_HUB_SDK_SSE_MAX_LINE_BYTES` (minimum 64 KiB) or the new
+  `WithSSEMaxLineBytes(n int)` client option.
+- Invalid env values **fail fast** in `New()` rather than silently falling back
+  to the default.
+- The buffer now starts at 64 KiB and grows on demand, so the higher ceiling
+  costs no steady-state memory.
+- Over-limit errors now report the limit, the bytes read, the env var to
+  raise, and a pointer to issue #60. The bare `token too long` gave none of
+  this, which is what made the outage slow to diagnose.
+
+**This is mitigation, not a fix.** Unread messages can grow without bound, so
+no limit closes this hole; hub-side `get_messages` paging is the real fix and
+is tracked separately in the `agent-hub` repo. Python and TypeScript SDKs are
+unaffected — both read SSE via the official MCP SDK, which has no fixed
+per-line cap.
+
 ## [0.10.0] — 2026-09-12
 
 ### Fixed — `mcp` dependency upper bound (issue #57) P0

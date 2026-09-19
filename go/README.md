@@ -49,6 +49,19 @@ Creates a new client. Call `Initialize` before any tool calls.
 **Options:**
 - `WithClientName(name string)` — override `clientInfo.name` in MCP handshake (default: `"agent-hub-sdk-go"`)
 - `WithHTTPTimeout(d time.Duration)` — override HTTP timeout (default: 90s)
+- `WithSSEMaxLineBytes(n int)` — override the SSE per-line size limit (default: 8 MiB); takes precedence over the environment variable below
+
+## Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `AGENT_HUB_SDK_SSE_MAX_LINE_BYTES` | `8388608` (8 MiB) | Maximum size of a single SSE line (= one event's `data`). Minimum `65536` (64 KiB). |
+
+Unset or empty → the default is used silently. **Set to an invalid value (non-integer, or below 64 KiB) → `New()` returns an error (fail-fast).** Invalid values are never silently replaced by the default: a size limit that is not in effect is exactly the failure mode this setting exists to prevent.
+
+> ⚠️ **Raising the limit is mitigation, not a fix** (issue #60). The hub's `get_messages` has no `limit` / paging and returns every unread message — bodies included — in a single response. Once that response exceeds the limit, the client can no longer read it, therefore cannot `mark_as_read`, therefore accumulates more unread messages — a self-reinforcing livelock that does not recover on its own. No value of this limit removes that structure; the real fix is paging in the hub.
+
+Only the Go SDK has such a limit. The Python and TypeScript SDKs read SSE through the official MCP SDK (`httpx-sse` / MCP TS SDK), which imposes no fixed per-line cap.
 
 ### Methods
 

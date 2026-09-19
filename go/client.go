@@ -5,10 +5,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,6 +26,30 @@ const (
 
 	defaultClientName    = "agent-hub-sdk-go"
 	defaultClientVersion = "0.1.0"
+
+	// sseMaxLineBytesEnv は SSE 1 行あたりの上限を上書きする環境変数名。
+	sseMaxLineBytesEnv = "AGENT_HUB_SDK_SSE_MAX_LINE_BYTES"
+
+	// defaultSSEMaxLineBytes は SSE 1 行 (= 1 イベントの data 行) の既定上限。
+	//
+	// ⚠️ これは緩和であって根本解決ではない (issue #60)。
+	// hub の get_messages は limit / paging を持たず、未読を全件 body 込みで
+	// 1 レスポンスに詰めて返す。未読は無制限に増えうるので、どんな上限を
+	// 置いても「未読が溜まりすぎると読めなくなる」構造そのものは残る。
+	// しかも一度超えると読めない → mark_as_read できない → 未読が増える →
+	// さらに読めない、という自己強化する livelock になり自然回復しない。
+	// 恒久対応は hub 側の get_messages paging。それが入るまでの時間稼ぎとして
+	// 旧値 128 KiB から引き上げてある。
+	defaultSSEMaxLineBytes = 8 << 20 // 8 MiB
+
+	// minSSEMaxLineBytes は環境変数で指定できる下限。これを下回る値は
+	// issue #60 の livelock を再発させるだけなので fail-fast で弾く。
+	minSSEMaxLineBytes = 64 * 1024 // 64 KiB
+
+	// sseInitialBufBytes は bufio.Scanner の初期バッファサイズ。
+	// 上限まで先に確保すると常時 8 MiB を掴むことになるので、初期は小さく取り
+	// 必要になった分だけ bufio.Scanner に伸ばさせる。
+	sseInitialBufBytes = 64 * 1024
 )
 
 // Client は agent-hub MCP エンドポイントとの接続を管理する。
@@ -66,6 +93,9 @@ type Client struct {
 	sseDone       <-chan struct{}
 	callbackMu    sync.Mutex // inboxCallback を保護する
 	inboxCallback func()
+	// sseMaxLineBytes は SSE 1 行あたりの上限 (issue #60)。
+	// New() が defaultSSEMaxLineBytes または環境変数の値で初期化する。
+	sseMaxLineBytes int
 }
 
 // ClientOption は Client の追加設定を行うオプション関数。
@@ -81,6 +111,13 @@ func WithClientName(name string) ClientOption {
 // デフォルト: 90 秒。
 func WithHTTPTimeout(d time.Duration) ClientOption {
 	return func(c *Client) { c.httpClient.Timeout = d }
+}
+
+// WithSSEMaxLineBytes は SSE 1 行あたりの上限をコードから上書きする。
+// 環境変数 AGENT_HUB_SDK_SSE_MAX_LINE_BYTES より優先される。
+// minSSEMaxLineBytes (64 KiB) 未満を渡した場合は New() がエラーを返す。
+func WithSSEMaxLineBytes(n int) ClientOption {
+	return func(c *Client) { c.sseMaxLineBytes = n }
 }
 
 // WithTransport は httpClient / sseClient 両方の http.Transport を差し替える。
@@ -129,6 +166,13 @@ func New(endpoint, pat, userID, tenantID string, opts ...ClientOption) (*Client,
 	if userID == "" {
 		return nil, fmt.Errorf("agenthub.New: userID is required")
 	}
+	// 環境変数は New() 時点で解決して fail-fast する。不正値を黙って既定値に
+	// 落とすと「設定したつもりで効いていない」状態になり、issue #60 のような
+	// サイレント縮退の原因になる。
+	maxLine, err := resolveSSEMaxLineBytes()
+	if err != nil {
+		return nil, fmt.Errorf("agenthub.New: %w", err)
+	}
 	c := &Client{
 		endpoint:   endpoint,
 		pat:        pat,
@@ -139,11 +183,39 @@ func New(endpoint, pat, userID, tenantID string, opts ...ClientOption) (*Client,
 		// 共有すると sseClient の長寿命接続が httpClient の MaxIdleConns 枠を消費する。
 		httpClient: &http.Client{Timeout: 90 * time.Second, Transport: newTransport()},
 		sseClient:  &http.Client{Timeout: 0, Transport: newTransport()}, // long-lived SSE 接続 — タイムアウト無効
+
+		sseMaxLineBytes: maxLine,
 	}
 	for _, o := range opts {
 		o(c)
 	}
+	// WithSSEMaxLineBytes で上書きされた値もここで検証する。
+	if c.sseMaxLineBytes < minSSEMaxLineBytes {
+		return nil, fmt.Errorf("agenthub.New: SSE max line bytes must be >= %d, got %d", minSSEMaxLineBytes, c.sseMaxLineBytes)
+	}
 	return c, nil
+}
+
+// resolveSSEMaxLineBytes は AGENT_HUB_SDK_SSE_MAX_LINE_BYTES を解決する。
+//
+//   - 未設定 / 空文字列 → defaultSSEMaxLineBytes (警告なし)
+//   - 設定ありかつ不正値 (非数値 / minSSEMaxLineBytes 未満) → error (fail-fast)
+//
+// 不正値を既定値に握り潰さないのは意図的。上限設定は「読めなくなる / 読める」の
+// 分岐そのものなので、効いていない設定に気づけないほうが害が大きい。
+func resolveSSEMaxLineBytes() (int, error) {
+	raw, ok := os.LookupEnv(sseMaxLineBytesEnv)
+	if !ok || raw == "" {
+		return defaultSSEMaxLineBytes, nil
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return 0, fmt.Errorf("%s=%q is not a valid integer (bytes): %w", sseMaxLineBytesEnv, raw, err)
+	}
+	if n < minSSEMaxLineBytes {
+		return 0, fmt.Errorf("%s=%d is below the minimum of %d bytes", sseMaxLineBytesEnv, n, minSSEMaxLineBytes)
+	}
+	return n, nil
 }
 
 // ──────────────────────────────────────────────────────────────────────── //
@@ -383,7 +455,7 @@ func (c *Client) postRPC(ctx context.Context, method string, params any, isNotif
 
 	ct := resp.Header.Get("Content-Type")
 	if strings.HasPrefix(ct, sseContentType) {
-		return readFirstSSEData(resp.Body)
+		return readFirstSSEData(resp.Body, c.sseMaxLineBytes)
 	}
 	return io.ReadAll(resp.Body)
 }
@@ -490,8 +562,7 @@ func (c *Client) runSSELoop(ctx context.Context, sid string) error {
 		return fmt.Errorf("SSE GET HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 128*1024), 128*1024)
+	scanner := newSSEScanner(resp.Body, c.sseMaxLineBytes)
 
 	var dataLines []string
 	for scanner.Scan() {
@@ -512,7 +583,7 @@ func (c *Client) runSSELoop(ctx context.Context, sid string) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		return fmt.Errorf("SSE scan: %w", err)
+		return fmt.Errorf("SSE scan: %w", scanner.describeErr(err))
 	}
 	return io.EOF
 }
@@ -582,11 +653,67 @@ func (c *Client) sendPong(ctx context.Context, sid string, id json.RawMessage) {
 
 // ──────────────────────────────────────────────────────────────────────── //
 
+// countingReader は下位 Reader から読み出した累計バイト数を数えるだけのラッパー。
+// bufio.Scanner が token too long で打ち切ったときに「どれだけ読んだか」を
+// エラーに載せるために使う (issue #60)。単一 goroutine から読まれる前提。
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (cr *countingReader) Read(p []byte) (int, error) {
+	n, err := cr.r.Read(p)
+	cr.n += int64(n)
+	return n, err
+}
+
+// sseScanner は bufio.Scanner に「上限値」と「読み出しバイト数」を持たせたもの。
+// 上限超過時に bufio.Scanner が返す ErrTooLong ("token too long") は
+// 何がどれだけ大きすぎたのかを一切伝えないため、describeErr で情報を補う。
+type sseScanner struct {
+	*bufio.Scanner
+	cr    *countingReader
+	limit int
+}
+
+// newSSEScanner は SSE 行読み取り用の Scanner を生成する。
+//
+// バッファは sseInitialBufBytes から始めて maxLineBytes まで bufio に伸ばさせる。
+// 上限まで先に確保しないのは、常時その分のメモリを掴まないため。
+func newSSEScanner(r io.Reader, maxLineBytes int) *sseScanner {
+	cr := &countingReader{r: r}
+	sc := bufio.NewScanner(cr)
+	initial := sseInitialBufBytes
+	if maxLineBytes < initial {
+		initial = maxLineBytes
+	}
+	sc.Buffer(make([]byte, initial), maxLineBytes)
+	return &sseScanner{Scanner: sc, cr: cr, limit: maxLineBytes}
+}
+
+// describeErr は bufio.ErrTooLong を「受信サイズ・上限値・対処法」つきの
+// エラーに差し替える。素の "token too long" だけだと原因特定に人手がかかる
+// (issue #60 の障害では実際にログから原因を切り分けるのに手間取った)。
+// それ以外のエラーはそのまま返す。
+func (s *sseScanner) describeErr(err error) error {
+	if !errors.Is(err, bufio.ErrTooLong) {
+		return err
+	}
+	// bufio.Scanner は上限を超えた時点で即座に打ち切るため、超過した行の実サイズは
+	// 分からない (分かっているのは「上限より大きい」ことだけ)。ここで出せる実測値は
+	// 「打ち切りまでに下位 Reader から読んだ累計バイト数」で、規模の目安になる。
+	return fmt.Errorf(
+		"SSE line exceeded the %d-byte limit (the line is larger than that; %d bytes read from the stream before aborting); "+
+			"this is usually get_messages returning too many unread messages at once — "+
+			"raise %s (bytes) to get unstuck, and note that no limit fixes this for good until the hub pages get_messages (issue #60): %w",
+		s.limit, s.cr.n, sseMaxLineBytesEnv, err,
+	)
+}
+
 // readFirstSSEData は SSE ストリームから最初のイベントの data を返す。
 // agent-hub の tools/call は 1 件のレスポンスしか送らないのでこれで十分。
-func readFirstSSEData(r io.Reader) ([]byte, error) {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 128*1024), 128*1024)
+func readFirstSSEData(r io.Reader, maxLineBytes int) ([]byte, error) {
+	scanner := newSSEScanner(r, maxLineBytes)
 
 	var dataLines []string
 	inEvent := false
@@ -608,7 +735,7 @@ func readFirstSSEData(r io.Reader) ([]byte, error) {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("SSE scan: %w", err)
+		return nil, fmt.Errorf("SSE scan: %w", scanner.describeErr(err))
 	}
 	if len(dataLines) > 0 {
 		return []byte(strings.Join(dataLines, "\n")), nil

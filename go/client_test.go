@@ -252,3 +252,159 @@ func TestOnInboxPush_noCallbackNoPanic(t *testing.T) {
 	// 短時間待って panic がないことを確認
 	time.Sleep(200 * time.Millisecond)
 }
+
+// ──────────────────────────────────────────────────────────────────────── //
+// SSE line size limit (issue #60)                                          //
+// ──────────────────────────────────────────────────────────────────────── //
+
+// newBigGetMessagesServer は get_messages に対して bodyBytes 程度の body を持つ
+// メッセージ 1 件を SSE (text/event-stream) で返すテストサーバを生成する。
+// hub の get_messages が未読を全件 1 レスポンスに詰めて返す挙動を模す。
+func newBigGetMessagesServer(t *testing.T, bodyBytes int) *httptest.Server {
+	t.Helper()
+	var reqCount atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("mcp-session-id", "test-session-id")
+
+		var req struct {
+			Method string `json:"method"`
+			Params struct {
+				Name string `json:"name"`
+			} `json:"params"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		n := reqCount.Add(1)
+
+		switch {
+		case req.Method == "initialize":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"test","version":"0.0.1"}}}`, n)
+		case req.Method == "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		case req.Method == "tools/call" && req.Params.Name == "get_messages":
+			// 巨大な未読 1 件を SSE の 1 data 行として返す。
+			msgs := fmt.Sprintf(`[{"id":"big1","from":"@alice","to":"@bot","message":%q}]`,
+				strings.Repeat("x", bodyBytes))
+			inner, err := json.Marshal(msgs)
+			if err != nil {
+				t.Errorf("marshal inner: %v", err)
+				return
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":%d,\"result\":{\"content\":[{\"type\":\"text\",\"text\":%s}]}}\n\n", n, inner)
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{}}`, n)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// 旧実装の 128 KiB 固定上限では "token too long" で恒久的に受信不能になっていた
+// サイズのレスポンスが、既定値 (8 MiB) で読めることを確認する (issue #60)。
+func TestGetMessages_largeResponseAboveOldLimit(t *testing.T) {
+	const bodyBytes = 512 * 1024 // 旧上限 128 KiB の 4 倍
+	srv := newBigGetMessagesServer(t, bodyBytes)
+
+	c, err := agenthub.New(srv.URL, "ghp_test", "bridge-test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+	if err := c.Initialize(ctx); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+
+	msgs, err := c.GetMessages(ctx)
+	if err != nil {
+		t.Fatalf("GetMessages: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("want 1 message, got %d", len(msgs))
+	}
+	if len(msgs[0].Body) != bodyBytes {
+		t.Errorf("body length: want %d, got %d", bodyBytes, len(msgs[0].Body))
+	}
+}
+
+// 上限を超えた場合のエラーに、受信サイズ・上限値・env 名が含まれることを確認する。
+// 素の "token too long" だけでは原因が分からないというのが issue #60 の要点。
+func TestGetMessages_overLimitErrorIsDiagnosable(t *testing.T) {
+	const limit = 64 * 1024
+	srv := newBigGetMessagesServer(t, 256*1024) // limit を確実に超えるサイズ
+
+	c, err := agenthub.New(srv.URL, "ghp_test", "bridge-test", "",
+		agenthub.WithSSEMaxLineBytes(limit))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+	if err := c.Initialize(ctx); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+
+	_, err = c.GetMessages(ctx)
+	if err == nil {
+		t.Fatal("want error for over-limit response")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		fmt.Sprintf("%d-byte limit", limit),          // 上限値
+		"bytes read from the stream before aborting", // 受信サイズ
+		"AGENT_HUB_SDK_SSE_MAX_LINE_BYTES",           // 対処に使う env 名
+		"issue #60",                                  // 根本原因への導線
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error message missing %q:\n%s", want, msg)
+		}
+	}
+}
+
+func TestNew_sseMaxLineBytes_envDefault(t *testing.T) {
+	// env 未設定 → 既定値が使われ、エラーも警告もなし。
+	t.Setenv("AGENT_HUB_SDK_SSE_MAX_LINE_BYTES", "")
+	if _, err := agenthub.New("http://localhost", "pat", "user", ""); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestNew_sseMaxLineBytes_envValid(t *testing.T) {
+	t.Setenv("AGENT_HUB_SDK_SSE_MAX_LINE_BYTES", "1048576")
+	if _, err := agenthub.New("http://localhost", "pat", "user", ""); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// 不正値は既定値に握り潰さず fail-fast する (サイレント縮退の防止)。
+func TestNew_sseMaxLineBytes_envInvalidFailsFast(t *testing.T) {
+	cases := map[string]string{
+		"non-numeric": "8MB",
+		"empty-ish":   "   ",
+		"zero":        "0",
+		"negative":    "-1",
+		"below-floor": "1024",
+	}
+	for name, val := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("AGENT_HUB_SDK_SSE_MAX_LINE_BYTES", val)
+			_, err := agenthub.New("http://localhost", "pat", "user", "")
+			if err == nil {
+				t.Fatalf("want error for %s=%q, got nil", "AGENT_HUB_SDK_SSE_MAX_LINE_BYTES", val)
+			}
+			if !strings.Contains(err.Error(), "AGENT_HUB_SDK_SSE_MAX_LINE_BYTES") {
+				t.Errorf("error should name the env var: %v", err)
+			}
+		})
+	}
+}
+
+// WithSSEMaxLineBytes で下限未満を渡した場合も New() が弾く。
+func TestNew_sseMaxLineBytes_optionBelowFloor(t *testing.T) {
+	_, err := agenthub.New("http://localhost", "pat", "user", "",
+		agenthub.WithSSEMaxLineBytes(1024))
+	if err == nil {
+		t.Fatal("want error for below-floor option value")
+	}
+}
