@@ -22,12 +22,15 @@ Raising the cap was considered and rejected: it only moves the cliff, and does
 not help a backlog the size of `@admin`'s.
 
 - `go/client.go`: both SSE read paths now use the shared, unbounded
-  `sseLineReader`. A line ≥ 8 MiB (`sseLineWarnBytes`) is read in full but
+  `sseLineReader`. A line ≥ 1 MiB (`sseLineWarnBytes`) is read in full but
   logged at `WARN` with the received size in bytes, so unbounded no longer
-  means unnoticed.
+  means unnoticed. The threshold is set just under the smallest backlog that
+  actually broke (≈ 1.4 MiB for `@admin`'s 1043 unread) and above a healthy one
+  (≈ 0.18 MiB for `@planner`'s 72).
 - No configuration surface added (no option, no env var) — there is no limit to
   configure.
-- Regression tests cover both call sites; all fail against the old scanner.
+- Regression tests cover both call sites; the three size regressions fail
+  against the old scanner.
 
 ## [0.10.0] — 2026-09-12
 

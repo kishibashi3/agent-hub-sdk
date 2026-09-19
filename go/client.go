@@ -38,7 +38,13 @@ const (
 	// (issue #60 では 128 KiB の固定上限を超えた時点で読めなくなり、しかも
 	// "token too long" としか出なかったため切り分けに時間がかかった)。
 	// 読み出しは続行したうえで、実サイズを数値でログに残す。
-	sseLineWarnBytes = 8 << 20 // 8 MiB
+	//
+	// 1 MiB は観測済みの backlog から決めた分界点。二重 JSON エンコード
+	// (messages 配列 → JSON → MCP content[].text → SSE data: 1 行) を踏まえると
+	// 未読 1043 件 (@admin 実績 / body 1 KiB 想定) で約 1.4 MiB に達する一方、
+	// 未読 72 件 (@planner 実績 / body 2 KiB 想定) は約 0.18 MiB に収まる。
+	// 実機のレスポンスサイズが実測できたら、その値を根拠に置き直す。
+	sseLineWarnBytes = 1 << 20 // 1 MiB
 )
 
 // Client は agent-hub MCP エンドポイントとの接続を管理する。

@@ -62,7 +62,7 @@ a backlog past the cap could no longer be read, therefore could not be `mark_as_
 therefore kept growing — a self-reinforcing livelock that never recovered on its own.
 Any fixed cap only moves that cliff; removing the cap removes the failure mode.
 
-A line at or above **8 MiB** is still read in full, but logs a `WARN` via `log/slog`
+A line at or above **1 MiB** is still read in full, but logs a `WARN` via `log/slog`
 with the received size in bytes. Unbounded reads must not mean unnoticed growth: the
 warning is the signal that a backlog is building up (or that the hub is returning far
 more than it should).

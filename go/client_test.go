@@ -341,7 +341,7 @@ func TestGetMessages_largeResponseAboveOldScannerLimit(t *testing.T) {
 // WARN 閾値を超えた行も読み切れること + 受信サイズが数値で WARN に出ること。
 // 上限を外した以上「巨大化していること自体に誰も気づかない」を防ぐのが目的。
 func TestGetMessages_oversizedLineIsReadAndWarned(t *testing.T) {
-	const bodyBytes = 9 << 20 // WARN 閾値 (8 MiB) 超え
+	const bodyBytes = 2 << 20 // WARN 閾値 (1 MiB) 超え
 
 	var buf bytes.Buffer
 	prev := slog.Default()
