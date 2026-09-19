@@ -6,6 +6,13 @@ Until `v1.0.0`, breaking changes between minor versions are possible. Each relea
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-09-20
+
+> **日付について**: このセクションは当初 `2026-09-12` 付けでリリース済みとして記載されていたが、
+> 実際には tag `v0.10.0` が打たれておらず、リリースされていなかった (`js/package.json` も `0.9.0`
+> のままだった)。そのため未リリース扱いに戻し、issue #60 の修正 (#62) を同じ 0.10.0 にまとめた上で、
+> 実際に tag を打つ日付 `2026-09-20` に改めている。
+
 ### Fixed — Go SDK: SSE line length limit removed (issue #60) P0
 
 The Go client read SSE with `bufio.Scanner` capped at 128 KiB per line, at both
@@ -31,8 +38,6 @@ not help a backlog the size of `@admin`'s.
   configure.
 - Regression tests cover both call sites; the three size regressions fail
   against the old scanner.
-
-## [0.10.0] — 2026-09-12
 
 ### Fixed — `mcp` dependency upper bound (issue #57) P0
 
