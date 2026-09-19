@@ -467,3 +467,99 @@ func TestSSEStream_largeEventStillDispatches(t *testing.T) {
 		t.Fatal("timeout: large SSE event did not reach the callback")
 	}
 }
+
+// ──────────────────────────────────────────────────────────────────────── //
+// 壊れた巨大 payload: エラー文字列が truncate されること (issue #64)        //
+// ──────────────────────────────────────────────────────────────────────── //
+
+// newBrokenGetMessagesServer は get_messages に対して JSON として壊れた
+// brokenBytes バイトのレスポンスを返すテストサーバを生成する。
+func newBrokenGetMessagesServer(t *testing.T, brokenBytes int) *httptest.Server {
+	t.Helper()
+	var reqCount atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("mcp-session-id", "test-session-id")
+
+		var req struct {
+			Method string `json:"method"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		n := reqCount.Add(1)
+
+		switch req.Method {
+		case "initialize":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"test","version":"0.0.1"}}}`, n)
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		default:
+			// 途中で切れた JSON (閉じ括弧なし) を 1 行の SSE data として返す。
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":%d,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"%s\n\n", n, strings.Repeat("x", brokenBytes))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// 旧実装は raw payload 全体を %q で抱えていたため、数 MiB のレスポンスが
+// そのまま (エスケープで膨らんだうえで) エラー文字列になっていた。
+func TestGetMessages_brokenLargePayload_errorIsTruncated(t *testing.T) {
+	const brokenBytes = 4 << 20 // 4 MiB
+	srv := newBrokenGetMessagesServer(t, brokenBytes)
+
+	c, err := agenthub.New(srv.URL, "ghp_test", "bridge-test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+	if err := c.Initialize(ctx); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+
+	_, err = c.GetMessages(ctx)
+	if err == nil {
+		t.Fatal("want unmarshal error for broken payload")
+	}
+
+	msg := err.Error()
+	// payload 本体は 2048 バイトまで。付随テキストを足しても 4 KiB には収まる。
+	if len(msg) > 4096 {
+		t.Errorf("error message not truncated: %d bytes (payload was %d bytes)", len(msg), brokenBytes)
+	}
+	// 全長は数値として残っていること (切り分けに必要)。
+	if !strings.Contains(msg, "raw ") || !strings.Contains(msg, "bytes") {
+		t.Errorf("error message lacks raw size info: %q", msg)
+	}
+	if !strings.Contains(msg, "first 2048") {
+		t.Errorf("error message lacks truncation marker: %q", msg)
+	}
+}
+
+// 小さい payload はそのまま全部出る (truncate しない)。
+func TestGetMessages_brokenSmallPayload_errorKeepsFullRaw(t *testing.T) {
+	const brokenBytes = 32
+	srv := newBrokenGetMessagesServer(t, brokenBytes)
+
+	c, err := agenthub.New(srv.URL, "ghp_test", "bridge-test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+	if err := c.Initialize(ctx); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+
+	_, err = c.GetMessages(ctx)
+	if err == nil {
+		t.Fatal("want unmarshal error for broken payload")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "first 2048") {
+		t.Errorf("small payload should not be truncated: %q", msg)
+	}
+	if !strings.Contains(msg, strings.Repeat("x", brokenBytes)) {
+		t.Errorf("small payload should appear in full: %q", msg)
+	}
+}

@@ -45,6 +45,15 @@ const (
 	// 未読 72 件 (@planner 実績 / body 2 KiB 想定) は約 0.18 MiB に収まる。
 	// 実機のレスポンスサイズが実測できたら、その値を根拠に置き直す。
 	sseLineWarnBytes = 1 << 20 // 1 MiB
+
+	// errRawSnippetBytes は、エラーメッセージに生 payload を埋め込むときの上限バイト数。
+	//
+	// 従来は bufio.Scanner の 128 KiB 固定上限が事実上のガードになっていたが、
+	// #60 で上限を撤廃したため、壊れた巨大レスポンスをそのまま %q で文字列化すると
+	// (エスケープで最悪 4 倍に膨らむ) 数 MiB〜数十 MiB のエラー文字列を、
+	// しかもメモリが逼迫している状況で生成してしまう。
+	// 切り分けには先頭だけあれば足りるので、全長は数値で別に出して本体は切り詰める。
+	errRawSnippetBytes = 2048
 )
 
 // Client は agent-hub MCP エンドポイントとの接続を管理する。
@@ -318,6 +327,15 @@ type contentBlock struct {
 	Text string `json:"text"`
 }
 
+// rawSnippet はエラーメッセージに添える生 payload の表現を返す。
+// 全長は常に数値で示し、本体は errRawSnippetBytes バイトまでに切り詰める。
+func rawSnippet(data []byte) string {
+	if len(data) <= errRawSnippetBytes {
+		return fmt.Sprintf("raw %d bytes: %q", len(data), data)
+	}
+	return fmt.Sprintf("raw %d bytes, first %d: %q", len(data), errRawSnippetBytes, data[:errRawSnippetBytes])
+}
+
 func (c *Client) callToolText(ctx context.Context, name string, args map[string]any) (string, error) {
 	params := toolCallParams{Name: name, Arguments: args}
 	data, err := c.postRPC(ctx, "tools/call", params, false)
@@ -326,7 +344,7 @@ func (c *Client) callToolText(ctx context.Context, name string, args map[string]
 	}
 	var rpc rpcResponse
 	if err := json.Unmarshal(data, &rpc); err != nil {
-		return "", fmt.Errorf("unmarshal rpc response: %w (raw: %q)", err, string(data))
+		return "", fmt.Errorf("unmarshal rpc response: %w (%s)", err, rawSnippet(data))
 	}
 	if rpc.Error != nil {
 		return "", fmt.Errorf("rpc error %d: %s", rpc.Error.Code, rpc.Error.Message)
