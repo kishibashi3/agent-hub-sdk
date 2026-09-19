@@ -50,6 +50,23 @@ Creates a new client. Call `Initialize` before any tool calls.
 - `WithClientName(name string)` — override `clientInfo.name` in MCP handshake (default: `"agent-hub-sdk-go"`)
 - `WithHTTPTimeout(d time.Duration)` — override HTTP timeout (default: 90s)
 
+## SSE line length: no limit (issue #60)
+
+SSE lines are read with `bufio.Reader.ReadString('\n')`, which has **no maximum line
+length**. There is nothing to configure — no option, no environment variable.
+
+This is deliberate. The hub's `get_messages` has no `limit` / paging and returns every
+unread message — bodies included — in a single SSE event, so line length grows with the
+unread backlog. With `bufio.Scanner` (the previous implementation, capped at 128 KiB)
+a backlog past the cap could no longer be read, therefore could not be `mark_as_read`,
+therefore kept growing — a self-reinforcing livelock that never recovered on its own.
+Any fixed cap only moves that cliff; removing the cap removes the failure mode.
+
+A line at or above **8 MiB** is still read in full, but logs a `WARN` via `log/slog`
+with the received size in bytes. Unbounded reads must not mean unnoticed growth: the
+warning is the signal that a backlog is building up (or that the hub is returning far
+more than it should).
+
 ### Methods
 
 | Method | Description |

@@ -4,6 +4,31 @@ All notable changes to `agent-hub-sdk` are recorded here. Format follows [Keep a
 
 Until `v1.0.0`, breaking changes between minor versions are possible. Each release tag (`vX.Y.Z` on `main`) corresponds to one section below.
 
+## [Unreleased]
+
+### Fixed — Go SDK: SSE line length limit removed (issue #60) P0
+
+The Go client read SSE with `bufio.Scanner` capped at 128 KiB per line, at both
+call sites (`readFirstSSEData` for `tools/call` responses, and the long-lived
+`GET /mcp` stream). `get_messages` returns every unread message — bodies
+included — in one SSE event, so the line grows with the unread backlog. Once it
+passed 128 KiB the client got `bufio.Scanner: token too long` and could no
+longer read anything, therefore could not `mark_as_read`, therefore accumulated
+more unread messages: a self-reinforcing livelock with no self-recovery.
+`@planner` (72 unread) and `@admin` (1043 unread) were both stuck this way.
+
+**Fix: `bufio.Reader` + `ReadString('\n')` — no line-length limit at all.**
+Raising the cap was considered and rejected: it only moves the cliff, and does
+not help a backlog the size of `@admin`'s.
+
+- `go/client.go`: both SSE read paths now use the shared, unbounded
+  `sseLineReader`. A line ≥ 8 MiB (`sseLineWarnBytes`) is read in full but
+  logged at `WARN` with the received size in bytes, so unbounded no longer
+  means unnoticed.
+- No configuration surface added (no option, no env var) — there is no limit to
+  configure.
+- Regression tests cover both call sites; all fail against the old scanner.
+
 ## [0.10.0] — 2026-09-12
 
 ### Fixed — `mcp` dependency upper bound (issue #57) P0
