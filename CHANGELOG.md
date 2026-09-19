@@ -6,6 +6,19 @@ Until `v1.0.0`, breaking changes between minor versions are possible. Each relea
 
 ## [Unreleased]
 
+## [0.10.1] — 2026-09-20
+
+### Fixed — Go SDK: unmarshal エラーの生 payload を truncate (issue #64) P1
+
+`callToolText` の unmarshal 失敗時、壊れた payload 全体を `%q` でエスケープして
+エラー文字列に埋め込んでいた。`v0.10.0` で SSE 行長の固定上限 (128 KiB) を撤廃した
+結果この暗黙のガードが消え、数 MiB〜数十 MiB のエラー文字列を、しかもメモリが
+逼迫している状況で生成しうるようになっていた (`%q` エスケープで最悪 4 倍)。
+
+- `go/client.go`: `rawSnippet()` を追加。全長は常に数値で残し (切り分けに必要)、
+  本体は `errRawSnippetBytes = 2048` までに切り詰める。
+- 公開 API の変更なし。エラー文字列の書式のみ変更 (機械判定している利用側は無し)。
+
 ## [0.10.0] — 2026-09-20
 
 > **日付について**: このセクションは当初 `2026-09-12` 付けでリリース済みとして記載されていたが、
