@@ -99,6 +99,14 @@ npm install github:kishibashi3/agent-hub-sdk
 
 Tag releases as `vX.Y.Z` on `main`. Consumers can pin a tag.
 
+### After tagging: bump the SDK ref in agent-hub-bridges CI
+
+The agent-hub-bridges CI (`.github/workflows/ci.yml`) checks out this SDK at a fixed commit SHA (`env.AGENT_HUB_SDK_REF`), so it does not pick up a new release on its own. If nobody bumps it, bridges CI keeps passing against an old SDK. After each release:
+
+1. Get the commit SHA of the release tag: `git rev-parse vX.Y.Z^{commit}`
+2. In `kishibashi3/agent-hub-bridges`, open a PR that sets `env.AGENT_HUB_SDK_REF` in `.github/workflows/ci.yml` to that SHA
+3. Confirm that bridges CI passes on that PR (kishibashi3/agent-hub-bridges#283)
+
 ## License
 
 By contributing you agree your contributions are licensed under the MIT License (see [LICENSE](./LICENSE)).
