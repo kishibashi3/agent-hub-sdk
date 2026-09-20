@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	agenthub "github.com/kishibashi3/agent-hub-sdk/go"
 )
@@ -576,6 +577,17 @@ func TestErrBodySnippet_truncatesLargeBody(t *testing.T) {
 	}
 	if len(got) > limit+64 { // 切り詰め本体 + マーカー分の余裕
 		t.Errorf("snippet length %d is not bounded by the %d-byte limit", len(got), limit)
+	}
+}
+
+// 切り詰めはバイト単位なのでマルチバイト rune を割る。割れた端切れを載せない。
+func TestErrBodySnippet_truncatedSnippetIsValidUTF8(t *testing.T) {
+	got := agenthub.ErrBodySnippet(strings.NewReader(strings.Repeat("あ", 1000)))
+	if !strings.Contains(got, "truncated at") {
+		t.Fatalf("want a truncation marker, got %q…", got[:min(len(got), 80)])
+	}
+	if !utf8.ValidString(got) {
+		t.Errorf("truncated snippet is not valid UTF-8: %q…", got[:min(len(got), 80)])
 	}
 }
 

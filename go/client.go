@@ -343,12 +343,16 @@ func rawSnippet(data []byte) string {
 // あり、それを全長エラー文字列に埋めると、切り分けには何の足しにもならないまま
 // メモリを食う。io.LimitReader で読み出し自体を止めるので、全長は分からない
 // (分かるには全部読む必要がある) — 切り詰めた事実だけを明示する。
+//
+// escaping は行わない (rawSnippet の %q と異なり body をそのまま載せる) — 小さな
+// エラー body をそのままの文字列として読めることを優先した意図的な選択。ただし
+// バイト単位の切り詰めは rune を途中で割るので、truncate 時のみ不正な UTF-8 を落とす。
 func errBodySnippet(r io.Reader) string {
 	// 上限 +1 バイト読んで「上限を超えていたか」を判定する
 	body, _ := io.ReadAll(io.LimitReader(r, errRawSnippetBytes+1))
 	if len(body) > errRawSnippetBytes {
 		return fmt.Sprintf("%s… (truncated at %d bytes)",
-			strings.TrimSpace(string(body[:errRawSnippetBytes])), errRawSnippetBytes)
+			strings.ToValidUTF8(strings.TrimSpace(string(body[:errRawSnippetBytes])), ""), errRawSnippetBytes)
 	}
 	return strings.TrimSpace(string(body))
 }
