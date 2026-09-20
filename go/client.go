@@ -155,7 +155,7 @@ func (c *Client) warnOversizedLine(n int) {
 			break
 		}
 	}
-	c.log().Warn("[sse] oversized line received — reading it anyway",
+	c.log().Warn("[agent-hub-sdk][sse] oversized line received — reading it anyway",
 		"bytes", n,
 		"warn_threshold_bytes", sseLineWarnBytes,
 		"hint", "get_messages returns every unread message in one response; a growing line means a growing unread backlog (issue #60). This WARN is rate-limited: it fires again only once the line size doubles.")

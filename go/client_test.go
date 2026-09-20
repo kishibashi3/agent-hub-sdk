@@ -363,6 +363,11 @@ func TestGetMessages_oversizedLineIsReadAndWarned(t *testing.T) {
 	if !strings.Contains(logged, "level=WARN") || !strings.Contains(logged, "oversized line received") {
 		t.Fatalf("want a WARN about the oversized line, got:\n%s", logged)
 	}
+	// 埋め込み側 (bridge 等) も自前の oversize WARN を出すため、ログを文言で grep した
+	// ときに SDK 由来だと判別できる識別子を必ず含める。
+	if !strings.Contains(logged, "[agent-hub-sdk]") {
+		t.Errorf("WARN should identify the SDK as its source, got:\n%s", logged)
+	}
 	// 受信サイズが数値で出ていること (行全体なので body より必ず大きい)
 	m := regexp.MustCompile(`bytes=(\d+)`).FindStringSubmatch(logged)
 	if m == nil {

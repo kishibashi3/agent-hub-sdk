@@ -73,6 +73,9 @@ line size has doubled. A backlog that merely sits above the threshold is polled
 repeatedly (each RPC builds a fresh reader), so warning per line would report
 "still stuck" thousands of times a day instead of "getting worse".
 
+The message is prefixed `[agent-hub-sdk][sse]` so that grepping logs for oversize
+warnings separates it from any oversize warning the embedding process emits itself.
+
 ### Methods
 
 | Method | Description |
