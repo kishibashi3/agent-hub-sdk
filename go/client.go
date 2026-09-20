@@ -535,7 +535,8 @@ func (c *Client) runSSELoop(ctx context.Context, sid string) error {
 	var dataLines []string
 	// flush は溜まっている data: 行を 1 イベントとして処理する。
 	// blank line での区切りだけでなく、ストリームが blank line 無しで終端した場合にも
-	// 呼ぶ (issue #63)。readFirstSSEData も終端時に同じく flush している。
+	// 呼ぶ (issue #63)。readFirstSSEData も EOF 終端時は同じく flush するが、非 EOF エラーでは
+	// 不完全な応答を呼び出し側に返さないため意図的に破棄する (ここはその点だけ作法が異なる)。
 	flush := func() {
 		if len(dataLines) > 0 {
 			c.handleSSEEvent(ctx, sid, []byte(strings.Join(dataLines, "\n")))
