@@ -336,6 +336,27 @@ func rawSnippet(data []byte) string {
 	return fmt.Sprintf("raw %d bytes, first %d: %q", len(data), errRawSnippetBytes, data[:errRawSnippetBytes])
 }
 
+// errBodySnippet は HTTP エラーレスポンスの body をエラーメッセージ用に読み出す。
+//
+// body は errRawSnippetBytes バイトまでしか読まない (issue #70)。前段に nginx /
+// Cloud Run / LB が居る構成では 502/503 の応答が数百 KiB の HTML になることが
+// あり、それを全長エラー文字列に埋めると、切り分けには何の足しにもならないまま
+// メモリを食う。io.LimitReader で読み出し自体を止めるので、全長は分からない
+// (分かるには全部読む必要がある) — 切り詰めた事実だけを明示する。
+//
+// escaping は行わない (rawSnippet の %q と異なり body をそのまま載せる) — 小さな
+// エラー body をそのままの文字列として読めることを優先した意図的な選択。ただし
+// バイト単位の切り詰めは rune を途中で割るので、truncate 時のみ不正な UTF-8 を落とす。
+func errBodySnippet(r io.Reader) string {
+	// 上限 +1 バイト読んで「上限を超えていたか」を判定する
+	body, _ := io.ReadAll(io.LimitReader(r, errRawSnippetBytes+1))
+	if len(body) > errRawSnippetBytes {
+		return fmt.Sprintf("%s… (truncated at %d bytes)",
+			strings.ToValidUTF8(strings.TrimSpace(string(body[:errRawSnippetBytes])), ""), errRawSnippetBytes)
+	}
+	return strings.TrimSpace(string(body))
+}
+
 func (c *Client) callToolText(ctx context.Context, name string, args map[string]any) (string, error) {
 	params := toolCallParams{Name: name, Arguments: args}
 	data, err := c.postRPC(ctx, "tools/call", params, false)
@@ -417,8 +438,7 @@ func (c *Client) postRPC(ctx context.Context, method string, params any, isNotif
 	}
 
 	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, errBodySnippet(resp.Body))
 	}
 
 	ct := resp.Header.Get("Content-Type")
@@ -526,8 +546,7 @@ func (c *Client) runSSELoop(ctx context.Context, sid string) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("SSE GET HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return fmt.Errorf("SSE GET HTTP %d: %s", resp.StatusCode, errBodySnippet(resp.Body))
 	}
 
 	lr := newSSELineReader(resp.Body)
