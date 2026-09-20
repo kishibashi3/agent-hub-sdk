@@ -97,6 +97,11 @@ type Client struct {
 	sseDone       <-chan struct{}
 	callbackMu    sync.Mutex // inboxCallback を保護する
 	inboxCallback func()
+	// logger は nil のとき slog.Default() を呼び出し時に解決する (WithLogger で注入可)。
+	logger *slog.Logger
+	// sseWarnedBytes は oversized line WARN を最後に出したときの行サイズ。
+	// 0 = 未警告。RPC ごとの reader と SSE ストリームの両方から触るので atomic。
+	sseWarnedBytes atomic.Int64
 }
 
 // ClientOption は Client の追加設定を行うオプション関数。
@@ -112,6 +117,48 @@ func WithClientName(name string) ClientOption {
 // デフォルト: 90 秒。
 func WithHTTPTimeout(d time.Duration) ClientOption {
 	return func(c *Client) { c.httpClient.Timeout = d }
+}
+
+// WithLogger はこの Client がログ出力に使う *slog.Logger を注入する。
+// デフォルト (未指定 / nil) は呼び出し時点の slog.Default()。
+//
+// library が process-global な slog.Default() に直接書くと、埋め込み側に出力先の
+// 注入点が無く、テストも slog.SetDefault を書き換えるしかなくなる (issue #65)。
+func WithLogger(l *slog.Logger) ClientOption {
+	return func(c *Client) { c.logger = l }
+}
+
+// log はこの Client のロガーを返す。未注入なら呼び出し時点の slog.Default()。
+func (c *Client) log() *slog.Logger {
+	if c.logger != nil {
+		return c.logger
+	}
+	return slog.Default()
+}
+
+// warnOversizedLine は sseLineWarnBytes を超えた行について WARN を出す。
+//
+// 「行ごとに 1 回」では運用上の頻度が決まらない: readFirstSSEData は RPC ごとに
+// 新しい reader を作るため、未読が閾値を超えたまま滞留している間は poll のたびに
+// 鳴り続ける (issue #65 S1)。前回警告時からサイズが 2 倍以上に増えたときだけ鳴らし、
+// 「滞留している」ではなく「悪化している」ことだけを報告する。
+func (c *Client) warnOversizedLine(n int) {
+	if n < sseLineWarnBytes {
+		return
+	}
+	for {
+		prev := c.sseWarnedBytes.Load()
+		if prev != 0 && int64(n) < prev*2 {
+			return // 前回警告から 2 倍未満 — 滞留しているだけなので鳴らさない
+		}
+		if c.sseWarnedBytes.CompareAndSwap(prev, int64(n)) {
+			break
+		}
+	}
+	c.log().Warn("[sse] oversized line received — reading it anyway",
+		"bytes", n,
+		"warn_threshold_bytes", sseLineWarnBytes,
+		"hint", "get_messages returns every unread message in one response; a growing line means a growing unread backlog (issue #60). This WARN is rate-limited: it fires again only once the line size doubles.")
 }
 
 // WithTransport は httpClient / sseClient 両方の http.Transport を差し替える。
@@ -423,7 +470,7 @@ func (c *Client) postRPC(ctx context.Context, method string, params any, isNotif
 
 	ct := resp.Header.Get("Content-Type")
 	if strings.HasPrefix(ct, sseContentType) {
-		return readFirstSSEData(resp.Body)
+		return c.readFirstSSEData(resp.Body)
 	}
 	return io.ReadAll(resp.Body)
 }
@@ -530,7 +577,7 @@ func (c *Client) runSSELoop(ctx context.Context, sid string) error {
 		return fmt.Errorf("SSE GET HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
-	lr := newSSELineReader(resp.Body)
+	lr := newSSELineReader(resp.Body, c.warnOversizedLine)
 
 	var dataLines []string
 	for {
@@ -636,25 +683,25 @@ func (c *Client) sendPong(ctx context.Context, sid string, id json.RawMessage) {
 // ReadString は上限を持たず必要なだけ確保して読み切るので、この失敗モード自体が消える。
 type sseLineReader struct {
 	br *bufio.Reader
+	// onOversize は sseLineWarnBytes 以上の行を読んだときに実サイズで呼ばれる。
+	// nil 可 (その場合は何もしない)。
+	onOversize func(n int)
 }
 
-func newSSELineReader(r io.Reader) *sseLineReader {
-	return &sseLineReader{br: bufio.NewReaderSize(r, sseReaderBufBytes)}
+func newSSELineReader(r io.Reader, onOversize func(n int)) *sseLineReader {
+	return &sseLineReader{br: bufio.NewReaderSize(r, sseReaderBufBytes), onOversize: onOversize}
 }
 
 // ReadLine は次の 1 行を行末の改行を除いて返す。
 //
-// 行長に上限はない。sseLineWarnBytes を超えた行は実サイズを WARN でログに出したうえで
+// 行長に上限はない。sseLineWarnBytes を超えた行は onOversize に実サイズを通知したうえで
 // そのまま返す (読み出しは続行する)。
 // ストリーム終端では最後の断片 (改行で終わっていない行) を返しつつ io.EOF を返すため、
 // 呼び出し側は「err != nil でも line が空でなければ処理する」こと。
 func (lr *sseLineReader) ReadLine() (string, error) {
 	line, err := lr.br.ReadString('\n')
-	if n := len(line); n >= sseLineWarnBytes {
-		slog.Warn("[sse] oversized line received — reading it anyway",
-			"bytes", n,
-			"warn_threshold_bytes", sseLineWarnBytes,
-			"hint", "get_messages returns every unread message in one response; a growing line means a growing unread backlog (issue #60)")
+	if n := len(line); n >= sseLineWarnBytes && lr.onOversize != nil {
+		lr.onOversize(n)
 	}
 	line = strings.TrimSuffix(line, "\n")
 	line = strings.TrimSuffix(line, "\r")
@@ -663,8 +710,8 @@ func (lr *sseLineReader) ReadLine() (string, error) {
 
 // readFirstSSEData は SSE ストリームから最初のイベントの data を返す。
 // agent-hub の tools/call は 1 件のレスポンスしか送らないのでこれで十分。
-func readFirstSSEData(r io.Reader) ([]byte, error) {
-	lr := newSSELineReader(r)
+func (c *Client) readFirstSSEData(r io.Reader) ([]byte, error) {
+	lr := newSSELineReader(r, c.warnOversizedLine)
 
 	var dataLines []string
 	inEvent := false

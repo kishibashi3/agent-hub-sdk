@@ -265,6 +265,14 @@ func TestOnInboxPush_noCallbackNoPanic(t *testing.T) {
 // メッセージ 1 件を SSE (1 行の data) で返すテストサーバを生成する。
 func newBigGetMessagesServer(t *testing.T, bodyBytes int) *httptest.Server {
 	t.Helper()
+	return newVariableGetMessagesServer(t, func() int { return bodyBytes })
+}
+
+// newVariableGetMessagesServer は newBigGetMessagesServer と同じだが、
+// レスポンスの body サイズを呼び出しごとに bodySize() で決める。
+// 「同じ大きさの未読が滞留している間の poll 連打」を再現するのに使う。
+func newVariableGetMessagesServer(t *testing.T, bodySize func() int) *httptest.Server {
+	t.Helper()
 	var reqCount atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("mcp-session-id", "test-session-id")
@@ -286,7 +294,7 @@ func newBigGetMessagesServer(t *testing.T, bodyBytes int) *httptest.Server {
 				"id":      "big1",
 				"from":    "@alice",
 				"to":      "@bridge-test",
-				"message": strings.Repeat("x", bodyBytes),
+				"message": strings.Repeat("x", bodySize()),
 			}})
 			if err != nil {
 				t.Error(err)
@@ -306,11 +314,11 @@ func newBigGetMessagesServer(t *testing.T, bodyBytes int) *httptest.Server {
 	return srv
 }
 
-func fetchOneBigMessage(t *testing.T, bodyBytes int) agenthub.Message {
+func fetchOneBigMessage(t *testing.T, bodyBytes int, opts ...agenthub.ClientOption) agenthub.Message {
 	t.Helper()
 	srv := newBigGetMessagesServer(t, bodyBytes)
 
-	c, err := agenthub.New(srv.URL, "ghp_test", "bridge-test", "")
+	c, err := agenthub.New(srv.URL, "ghp_test", "bridge-test", "", opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,11 +352,9 @@ func TestGetMessages_oversizedLineIsReadAndWarned(t *testing.T) {
 	const bodyBytes = 2 << 20 // WARN 閾値 (1 MiB) 超え
 
 	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
-	msg := fetchOneBigMessage(t, bodyBytes)
+	msg := fetchOneBigMessage(t, bodyBytes, agenthub.WithLogger(logger))
 	if len(msg.Body) != bodyBytes {
 		t.Errorf("body length: want %d, got %d", bodyBytes, len(msg.Body))
 	}
@@ -374,11 +380,9 @@ func TestGetMessages_oversizedLineIsReadAndWarned(t *testing.T) {
 // 閾値以下の通常サイズでは WARN を出さない (ログを汚さない)。
 func TestGetMessages_normalSizeIsNotWarned(t *testing.T) {
 	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
-	fetchOneBigMessage(t, 1024)
+	fetchOneBigMessage(t, 1024, agenthub.WithLogger(logger))
 
 	if strings.Contains(buf.String(), "oversized line") {
 		t.Errorf("unexpected WARN for a normal-sized response:\n%s", buf.String())
@@ -561,5 +565,80 @@ func TestGetMessages_brokenSmallPayload_errorKeepsFullRaw(t *testing.T) {
 	}
 	if !strings.Contains(msg, strings.Repeat("x", brokenBytes)) {
 		t.Errorf("small payload should appear in full: %q", msg)
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────── //
+// oversized line WARN のレート制限 / WithLogger (issue #65)                //
+// ──────────────────────────────────────────────────────────────────────── //
+
+// newWarnCountingClient は WARN を buf に集める client と、poll のたびの body サイズを
+// 決める関数を組み合わせて返す。
+func newWarnCountingClient(t *testing.T, buf *bytes.Buffer, bodySize func() int) *agenthub.Client {
+	t.Helper()
+	srv := newVariableGetMessagesServer(t, bodySize)
+	logger := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	c, err := agenthub.New(srv.URL, "ghp_test", "bridge-test", "", agenthub.WithLogger(logger))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Initialize(t.Context()); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	return c
+}
+
+func countOversizedWarns(logged string) int {
+	return strings.Count(logged, "oversized line received")
+}
+
+// 未読が閾値を超えたまま滞留している間、poll を繰り返しても WARN は 1 回だけ。
+// readFirstSSEData は RPC ごとに新しい reader を作るため、レート制限が無いと
+// poll のたびに鳴り続ける (bridge の safety-net poll 30 秒で 2,880 行/日)。
+func TestOversizedWarn_isRateLimitedAcrossPolls(t *testing.T) {
+	var buf bytes.Buffer
+	c := newWarnCountingClient(t, &buf, func() int { return 2 << 20 }) // 閾値 1 MiB 超え
+
+	for i := 0; i < 5; i++ {
+		if _, err := c.GetMessages(t.Context()); err != nil {
+			t.Fatalf("GetMessages #%d: %v", i, err)
+		}
+	}
+
+	if got := countOversizedWarns(buf.String()); got != 1 {
+		t.Errorf("want exactly 1 WARN for a stable backlog across 5 polls, got %d:\n%s", got, buf.String())
+	}
+}
+
+// 「滞留」は黙るが「悪化」(サイズが 2 倍以上) は鳴る。
+func TestOversizedWarn_firesAgainWhenSizeDoubles(t *testing.T) {
+	var buf bytes.Buffer
+	var size atomic.Int64
+	size.Store(2 << 20)
+	c := newWarnCountingClient(t, &buf, func() int { return int(size.Load()) })
+
+	if _, err := c.GetMessages(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got := countOversizedWarns(buf.String()); got != 1 {
+		t.Fatalf("want 1 WARN after the first oversized poll, got %d", got)
+	}
+
+	// わずかな増加では鳴らない
+	size.Store(2<<20 + 1024)
+	if _, err := c.GetMessages(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got := countOversizedWarns(buf.String()); got != 1 {
+		t.Errorf("a small increase should stay silent, got %d WARNs:\n%s", got, buf.String())
+	}
+
+	// 2 倍を超えたら鳴る
+	size.Store(6 << 20)
+	if _, err := c.GetMessages(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got := countOversizedWarns(buf.String()); got != 2 {
+		t.Errorf("want a second WARN once the line size doubled, got %d:\n%s", got, buf.String())
 	}
 }
