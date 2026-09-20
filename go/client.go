@@ -142,6 +142,11 @@ func (c *Client) log() *slog.Logger {
 // 新しい reader を作るため、未読が閾値を超えたまま滞留している間は poll のたびに
 // 鳴り続ける (issue #65 S1)。前回警告時からサイズが 2 倍以上に増えたときだけ鳴らし、
 // 「滞留している」ではなく「悪化している」ことだけを報告する。
+//
+// sseWarnedBytes は単調増加で、下方向の reset は意図的に持たない (reset 忘れではない)。
+// backlog が回復してから同じ水準まで再び悪化した場合、2 回目以降は鳴らない。行単位では
+// 閾値未満の行 (event: 行・空行) が毎回リセットしてしまい抑制が壊れるため、reset を入れる
+// ならイベント単位の判定が必要で、本 SDK では「鳴らし過ぎない」側に倒している。
 func (c *Client) warnOversizedLine(n int) {
 	if n < sseLineWarnBytes {
 		return

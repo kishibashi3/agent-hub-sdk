@@ -49,7 +49,7 @@ Creates a new client. Call `Initialize` before any tool calls.
 **Options:**
 - `WithClientName(name string)` — override `clientInfo.name` in MCP handshake (default: `"agent-hub-sdk-go"`)
 - `WithHTTPTimeout(d time.Duration)` — override HTTP timeout (default: 90s)
-- `WithLogger(l *slog.Logger)` — inject the logger this client writes to (default: `slog.Default()`, resolved at call time)
+- `WithLogger(l *slog.Logger)` — inject the logger used for the SDK's SSE warnings (default: `slog.Default()`, resolved at call time). Note: `CommandRouter` still logs via `slog.Default()` directly and is not affected.
 
 ## SSE line length: no limit (issue #60)
 
