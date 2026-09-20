@@ -533,6 +533,15 @@ func (c *Client) runSSELoop(ctx context.Context, sid string) error {
 	lr := newSSELineReader(resp.Body)
 
 	var dataLines []string
+	// flush は溜まっている data: 行を 1 イベントとして処理する。
+	// blank line での区切りだけでなく、ストリームが blank line 無しで終端した場合にも
+	// 呼ぶ (issue #63)。readFirstSSEData も終端時に同じく flush している。
+	flush := func() {
+		if len(dataLines) > 0 {
+			c.handleSSEEvent(ctx, sid, []byte(strings.Join(dataLines, "\n")))
+			dataLines = dataLines[:0]
+		}
+	}
 	for {
 		line, readErr := lr.ReadLine()
 		if readErr == nil || line != "" {
@@ -540,10 +549,7 @@ func (c *Client) runSSELoop(ctx context.Context, sid string) error {
 				return ctx.Err()
 			}
 			if line == "" {
-				if len(dataLines) > 0 {
-					c.handleSSEEvent(ctx, sid, []byte(strings.Join(dataLines, "\n")))
-					dataLines = dataLines[:0]
-				}
+				flush()
 			} else if strings.HasPrefix(line, "data:") {
 				dataLines = append(dataLines, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
 			}
@@ -552,6 +558,10 @@ func (c *Client) runSSELoop(ctx context.Context, sid string) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
+			// 受信済みのイベントは読み取りエラーの種類によらず捨てない。
+			// 行として完結した data: を、後続の接続断だけを理由に落とすと
+			// inbox 通知が 1 件無かったことになる (再送されない)。
+			flush()
 			if errors.Is(readErr, io.EOF) {
 				return io.EOF
 			}

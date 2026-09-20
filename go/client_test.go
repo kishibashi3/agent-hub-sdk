@@ -563,3 +563,131 @@ func TestGetMessages_brokenSmallPayload_errorKeepsFullRaw(t *testing.T) {
 		t.Errorf("small payload should appear in full: %q", msg)
 	}
 }
+
+// ──────────────────────────────────────────────────────────────────────── //
+// runSSELoop: 終端時の flush (issue #63)                                   //
+// ──────────────────────────────────────────────────────────────────────── //
+
+// sseStreamServer は GET /mcp で writeSSE の内容だけを流して閉じるサーバ。
+// POST は newTestServer と同じ最小の MCP 応答を返す。
+func sseStreamServer(t *testing.T, writeSSE func(w http.ResponseWriter)) *httptest.Server {
+	t.Helper()
+	var reqCount atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("mcp-session-id", "test-session-id")
+		if r.Method == http.MethodGet {
+			// ヘッダは writeSSE 側で書く (Hijack するケースがあるため)
+			writeSSE(w)
+			return
+		}
+		var req struct {
+			Method string `json:"method"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		n := reqCount.Add(1)
+		switch req.Method {
+		case "initialize":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"test","version":"0.0.1"}}}`, n)
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{}}`, n)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func writeSSEHeaders(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.WriteHeader(http.StatusOK)
+}
+
+// startSSEWithCallback は SSE を開始し、inbox push が来たら閉じる channel を返す。
+func startSSEWithCallback(t *testing.T, srv *httptest.Server) <-chan struct{} {
+	t.Helper()
+	c, err := agenthub.New(srv.URL, "ghp_test", "bridge-test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	var fired atomic.Bool
+	c.OnInboxPush(func() {
+		if fired.CompareAndSwap(false, true) {
+			close(done)
+		}
+	})
+	ctx := t.Context()
+	if err := c.Initialize(ctx); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	if err := c.StartSSE(ctx); err != nil {
+		t.Fatalf("StartSSE: %v", err)
+	}
+	t.Cleanup(c.StopSSE)
+	return done
+}
+
+const inboxNotification = `{"jsonrpc":"2.0","method":"notifications/resources/updated","params":{"uri":"inbox://@bridge-test"}}`
+
+// blank line 無しで EOF 終端したストリームでも、溜まっている data: 行を取りこぼさないこと。
+// 修正前は readErr == io.EOF の時点で dataLines ごと捨てていたため発火しない。
+func TestSSEStream_flushesPendingEventOnEOF(t *testing.T) {
+	srv := sseStreamServer(t, func(w http.ResponseWriter) {
+		writeSSEHeaders(w)
+		// 末尾の blank line 無しで接続終了
+		fmt.Fprintf(w, "event: message\ndata: %s\n", inboxNotification)
+	})
+
+	select {
+	case <-startSSEWithCallback(t, srv):
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout: event terminated by EOF (no blank line) did not reach the callback")
+	}
+}
+
+// 行の途中で EOF した場合 (data: 行が改行で終わらない) も、その断片を含めて flush すること。
+func TestSSEStream_flushesPartialLineOnEOF(t *testing.T) {
+	srv := sseStreamServer(t, func(w http.ResponseWriter) {
+		writeSSEHeaders(w)
+		// 改行すら無しで接続終了
+		fmt.Fprintf(w, "event: message\ndata: %s", inboxNotification)
+	})
+
+	select {
+	case <-startSSEWithCallback(t, srv):
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout: event terminated mid-line did not reach the callback")
+	}
+}
+
+// 非 EOF の read エラー (chunked 応答が終端チャンク無しで切れる = io.ErrUnexpectedEOF)
+// でも、行として完結済みの data: は捨てないこと。再送されないため落とすと通知が消える。
+func TestSSEStream_flushesPendingEventOnUnexpectedEOF(t *testing.T) {
+	srv := sseStreamServer(t, func(w http.ResponseWriter) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Error("ResponseWriter does not support hijacking")
+			return
+		}
+		conn, bw, err := hj.Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		// 終端チャンク (0\r\n\r\n) を書かずに切る → client 側は io.ErrUnexpectedEOF
+		fmt.Fprint(bw, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nmcp-session-id: test-session-id\r\nTransfer-Encoding: chunked\r\n\r\n")
+		chunk := fmt.Sprintf("event: message\ndata: %s\n", inboxNotification)
+		fmt.Fprintf(bw, "%x\r\n%s\r\n", len(chunk), chunk)
+		_ = bw.Flush()
+		_ = conn.Close()
+	})
+
+	select {
+	case <-startSSEWithCallback(t, srv):
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout: event followed by an unexpected EOF did not reach the callback")
+	}
+}
