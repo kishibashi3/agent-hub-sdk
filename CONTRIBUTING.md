@@ -108,6 +108,7 @@ The version string lives in more than one file. Bump them together in the releas
 | `CHANGELOG.md` | add the release section |
 | `js/package.json` | edit `version` |
 | `js/package-lock.json` | `cd js && npm install --package-lock-only` (updates both `version` and `packages[""].version`) |
+| `python/src/agent_hub_sdk/version.py` | edit `__version__` (`python/pyproject.toml` reads it via `dynamic = ["version"]`) |
 
 `npm install` / `npm ci` rewrite the lock's version from `package.json`, so a stale
 lock never breaks a build — which is exactly why it drifts unnoticed (issue #69: it sat
