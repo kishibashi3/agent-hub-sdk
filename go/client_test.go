@@ -563,3 +563,146 @@ func TestGetMessages_brokenSmallPayload_errorKeepsFullRaw(t *testing.T) {
 		t.Errorf("small payload should appear in full: %q", msg)
 	}
 }
+
+// ──────────────────────────────────────────────────────────────────────── //
+// HTTP エラー body の上限 (issue #70)                                      //
+// ──────────────────────────────────────────────────────────────────────── //
+
+func TestErrBodySnippet_truncatesLargeBody(t *testing.T) {
+	const limit = 2048
+	got := agenthub.ErrBodySnippet(strings.NewReader(strings.Repeat("A", 512*1024)))
+	if !strings.Contains(got, "truncated at") {
+		t.Errorf("want a truncation marker, got %q…", got[:min(len(got), 80)])
+	}
+	if len(got) > limit+64 { // 切り詰め本体 + マーカー分の余裕
+		t.Errorf("snippet length %d is not bounded by the %d-byte limit", len(got), limit)
+	}
+}
+
+func TestErrBodySnippet_keepsSmallBodyVerbatim(t *testing.T) {
+	const body = `{"error":"participant not found"}`
+	if got := agenthub.ErrBodySnippet(strings.NewReader(body)); got != body {
+		t.Errorf("want the body verbatim, got %q", got)
+	}
+	if got := agenthub.ErrBodySnippet(strings.NewReader("  " + body + "\n")); got != body {
+		t.Errorf("want surrounding whitespace trimmed, got %q", got)
+	}
+}
+
+// postRPC (client.go:420) — LB が返す巨大な HTML エラーでエラー文字列が膨らまないこと。
+func TestPostRPC_errorBodyIsTruncated(t *testing.T) {
+	huge := strings.Repeat("<html>502 Bad Gateway</html>", 32*1024) // ≒ 900 KiB
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("mcp-session-id", "test-session-id")
+		var req struct {
+			Method string `json:"method"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Method == "initialize" {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"test","version":"0.0.1"}}}`)
+			return
+		}
+		w.WriteHeader(http.StatusBadGateway)
+		fmt.Fprint(w, huge)
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := agenthub.New(srv.URL, "ghp_test", "bridge-test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+	if err := c.Initialize(ctx); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	_, err = c.GetMessages(ctx)
+	if err == nil {
+		t.Fatal("want an error for HTTP 502")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "HTTP 502") {
+		t.Errorf("want the status code in the error, got %q", msg[:min(len(msg), 120)])
+	}
+	if len(msg) > 4096 {
+		t.Errorf("error string length %d — the %d KiB body was not truncated", len(msg), len(huge)/1024)
+	}
+}
+
+// 小さいエラー body は従来どおり全文が出ること (回帰防止)。
+func TestPostRPC_smallErrorBodyIsKept(t *testing.T) {
+	const detail = `{"error":"tenant not found"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("mcp-session-id", "test-session-id")
+		var req struct {
+			Method string `json:"method"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Method == "initialize" {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"test","version":"0.0.1"}}}`)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, detail)
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := agenthub.New(srv.URL, "ghp_test", "bridge-test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+	if err := c.Initialize(ctx); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	if _, err := c.GetMessages(ctx); err == nil || !strings.Contains(err.Error(), detail) {
+		t.Fatalf("want the full body in the error, got %v", err)
+	}
+}
+
+// runSSELoop (client.go:529) — SSE GET のエラー応答も同じく切り詰めること。
+// handleSSEStream は runSSELoop のエラーを握り潰すため、白箱フックで直接叩く。
+func TestRunSSELoop_errorBodyIsTruncated(t *testing.T) {
+	huge := strings.Repeat("<html>503 Service Unavailable</html>", 32*1024)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprint(w, huge)
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := agenthub.New(srv.URL, "ghp_test", "bridge-test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = c.RunSSELoopForTest(t.Context(), "test-session-id")
+	if err == nil {
+		t.Fatal("want an error for SSE GET HTTP 503")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "SSE GET HTTP 503") {
+		t.Errorf("want the status code in the error, got %q", msg[:min(len(msg), 120)])
+	}
+	if len(msg) > 4096 {
+		t.Errorf("error string length %d — the %d KiB body was not truncated", len(msg), len(huge)/1024)
+	}
+}
+
+// 小さい SSE GET エラー body は全文が出ること。
+func TestRunSSELoop_smallErrorBodyIsKept(t *testing.T) {
+	const detail = `{"error":"session not found"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, detail)
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := agenthub.New(srv.URL, "ghp_test", "bridge-test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = c.RunSSELoopForTest(t.Context(), "test-session-id")
+	if err == nil || !strings.Contains(err.Error(), detail) {
+		t.Fatalf("want the full body in the error, got %v", err)
+	}
+}
