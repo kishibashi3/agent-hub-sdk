@@ -529,8 +529,18 @@ func TestGetMessages_brokenLargePayload_errorIsTruncated(t *testing.T) {
 		t.Errorf("error message not truncated: %d bytes (payload was %d bytes)", len(msg), brokenBytes)
 	}
 	// 全長は数値として残っていること (切り分けに必要)。
-	if !strings.Contains(msg, "raw ") || !strings.Contains(msg, "bytes") {
-		t.Errorf("error message lacks raw size info: %q", msg)
+	// 切り詰め後の長さ (2048) を報告する退行を落とすため、実際の値まで検証する。
+	m := regexp.MustCompile(`raw (\d+) bytes`).FindStringSubmatch(msg)
+	if m == nil {
+		t.Fatalf("error message lacks raw size info: %q", msg)
+	}
+	reported, convErr := strconv.Atoi(m[1])
+	if convErr != nil {
+		t.Fatalf("raw size is not a number: %q", m[1])
+	}
+	// payload は SSE/JSON の prefix を含むので brokenBytes 以上になる。
+	if reported < brokenBytes {
+		t.Errorf("raw size %d is not the full payload length (want >= %d): %q", reported, brokenBytes, msg)
 	}
 	if !strings.Contains(msg, "first 2048") {
 		t.Errorf("error message lacks truncation marker: %q", msg)
