@@ -1,8 +1,12 @@
 package agenthub_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
+	"net/http"
+	"strings"
 	"testing"
 
 	agenthub "github.com/kishibashi3/agent-hub-sdk/go"
@@ -207,4 +211,41 @@ func TestNewCommandRouter(t *testing.T) {
 		return "second", nil
 	})
 	// no panic
+}
+
+// ── WithLogger の効果範囲 (issue #78) ─────────────────────────────────────────
+
+// CommandRouter のログは Handle に渡した Client のロガー (WithLogger) に出ること。
+// slog.Default() には漏れないこと。
+func TestCommandRouter_logsViaClientLogger(t *testing.T) {
+	var defaultBuf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&defaultBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	srv := sseStreamServer(t, func(w http.ResponseWriter) { writeSSEHeaders(w) })
+	var injected bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&injected, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	c, err := agenthub.New(srv.URL, "ghp_test", "bridge-test", "", agenthub.WithLogger(logger))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Initialize(t.Context()); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+
+	router := agenthub.NewCommandRouter()
+	if !router.Handle(t.Context(), c, agenthub.Message{ID: "m1", Sender: "@alice", Body: "/ping"}) {
+		t.Fatal("Handle(/ping) returned false")
+	}
+
+	got := injected.String()
+	for _, want := range []string{"[command] received", "[command] /ping"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("injected logger lacks %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(defaultBuf.String(), "[command]") {
+		t.Errorf("CommandRouter logged to slog.Default() despite WithLogger:\n%s", defaultBuf.String())
+	}
 }
