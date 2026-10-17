@@ -877,3 +877,154 @@ func TestSSEStream_invalidJSONIsLoggedAtDebug(t *testing.T) {
 		t.Errorf("log line not truncated: %d bytes (payload was %d bytes)", len(line), brokenBytes)
 	}
 }
+
+// ──────────────────────────────────────────────────────────────────────── //
+// SSE 周辺の並行経路と dispatch 回数 (issue #80)                            //
+// ──────────────────────────────────────────────────────────────────────── //
+
+// SSE ストリームと RPC poll の両方から warnOversizedLine を並行に叩いても、
+// データ競合なく (-race) WARN が 1 回に収まること。
+// 行サイズはどちらも 2 MiB 前後で、互いに 2 倍未満なのでレート制限上は 1 回。
+func TestOversizedWarn_concurrentSSEAndPolls(t *testing.T) {
+	const (
+		lineBytes = 2 << 20 // 閾値 1 MiB 超え
+		sseEvents = 4
+		polls     = 8
+	)
+	padded := fmt.Sprintf(`{"jsonrpc":"2.0","method":"notifications/resources/updated","params":{"uri":"inbox://@bridge-test","pad":"%s"}}`, strings.Repeat("x", lineBytes))
+
+	var reqCount atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("mcp-session-id", "test-session-id")
+		if r.Method == http.MethodGet {
+			writeSSEHeaders(w)
+			for i := 0; i < sseEvents; i++ {
+				fmt.Fprintf(w, "event: message\ndata: %s\n\n", padded)
+				if f, ok := w.(http.Flusher); ok {
+					f.Flush()
+				}
+			}
+			<-r.Context().Done() // 再接続させない
+			return
+		}
+		var req struct {
+			Method string `json:"method"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		n := reqCount.Add(1)
+		switch req.Method {
+		case "initialize":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"test","version":"0.0.1"}}}`, n)
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		default:
+			payload, _ := json.Marshal([]map[string]string{{
+				"id": "big1", "from": "@alice", "to": "@bridge-test",
+				"message": strings.Repeat("x", lineBytes),
+			}})
+			inner, _ := json.Marshal(string(payload))
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":%d,\"result\":{\"content\":[{\"type\":\"text\",\"text\":%s}]}}\n\n", n, inner)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	var logBuf lockedBuffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	c, err := agenthub.New(srv.URL, "ghp_test", "bridge-test", "", agenthub.WithLogger(logger))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pushes atomic.Int32
+	allPushed := make(chan struct{})
+	c.OnInboxPush(func() {
+		if pushes.Add(1) == sseEvents {
+			close(allPushed)
+		}
+	})
+	ctx := t.Context()
+	if err := c.Initialize(ctx); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	if err := c.StartSSE(ctx); err != nil {
+		t.Fatalf("StartSSE: %v", err)
+	}
+	t.Cleanup(c.StopSSE)
+
+	// poll は 1 goroutine から連打する (SSE goroutine と並行)。
+	// 複数 goroutine からの並行 RPC は sessionID 書き込みが別途競合するため対象外。
+	for i := 0; i < polls; i++ {
+		if _, err := c.GetMessages(ctx); err != nil {
+			t.Fatalf("GetMessages #%d: %v", i, err)
+		}
+	}
+
+	select {
+	case <-allPushed:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("timeout: only %d/%d oversized SSE events dispatched", pushes.Load(), sseEvents)
+	}
+
+	if got := countOversizedWarns(logBuf.String()); got != 1 {
+		t.Errorf("want exactly 1 WARN across concurrent SSE + polls, got %d:\n%s", got, logBuf.String())
+	}
+}
+
+// 1 つのイベントは、終端の形によらずちょうど 1 回だけ dispatch されること。
+// startSSEWithCallback の latch は 1 回目で閉じるため、二重 dispatch を見逃す。
+// ここでは回数を数え、ストリーム終了後の再接続 (GET 2 本目) を「1 本目の処理が
+// 全て終わった」合図にしてから判定する。
+func TestSSEStream_eventDispatchedExactlyOnce(t *testing.T) {
+	cases := []struct {
+		name   string
+		stream string
+	}{
+		{"blank line then EOF", "event: message\ndata: " + inboxNotification + "\n\n"},
+		{"newline then EOF", "event: message\ndata: " + inboxNotification + "\n"},
+		{"mid-line EOF", "event: message\ndata: " + inboxNotification},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var gets atomic.Int32
+			reconnected := make(chan struct{})
+			srv := sseStreamServer(t, func(w http.ResponseWriter) {
+				writeSSEHeaders(w)
+				if gets.Add(1) == 1 {
+					fmt.Fprint(w, tc.stream)
+					return
+				}
+				close(reconnected)
+			})
+
+			c, err := agenthub.New(srv.URL, "ghp_test", "bridge-test", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var calls atomic.Int32
+			c.OnInboxPush(func() { calls.Add(1) })
+			ctx := t.Context()
+			if err := c.Initialize(ctx); err != nil {
+				t.Fatalf("Initialize: %v", err)
+			}
+			if err := c.StartSSE(ctx); err != nil {
+				t.Fatalf("StartSSE: %v", err)
+			}
+
+			select {
+			case <-reconnected:
+			case <-time.After(10 * time.Second):
+				t.Fatal("timeout: SSE did not reconnect after the first stream ended")
+			}
+			c.StopSSE()
+			// callback は go fn() で起動されるので、実行が追いつくのを少し待つ。
+			time.Sleep(100 * time.Millisecond)
+
+			if got := calls.Load(); got != 1 {
+				t.Errorf("want exactly 1 dispatch, got %d", got)
+			}
+		})
+	}
+}
