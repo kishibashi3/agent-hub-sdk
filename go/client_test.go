@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -783,5 +784,96 @@ func TestOversizedWarn_firesAgainWhenSizeDoubles(t *testing.T) {
 	}
 	if got := countOversizedWarns(buf.String()); got != 2 {
 		t.Errorf("want a second WARN once the line size doubled, got %d:\n%s", got, buf.String())
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────── //
+// SSE イベントの JSON unmarshal 失敗を Debug ログに残す (issue #79)          //
+// ──────────────────────────────────────────────────────────────────────── //
+
+// lockedBuffer は SSE goroutine と test goroutine から並行に触れる log 出力先。
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// 壊れた JSON の SSE イベントは捨てるが、Debug ログを 1 行残すこと。
+// payload は rawSnippet と同じく全長 + 先頭 errRawSnippetBytes に切り詰める。
+func TestSSEStream_invalidJSONIsLoggedAtDebug(t *testing.T) {
+	const brokenBytes = 64 << 10 // snippet 上限より十分大きい
+	srv := sseStreamServer(t, func(w http.ResponseWriter) {
+		writeSSEHeaders(w)
+		// 壊れたイベント → 正常な inbox 通知の順に流す。
+		// 同じ goroutine で順に処理されるので、callback 発火時点で前者のログは出ている。
+		fmt.Fprintf(w, "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"%s\n\n", strings.Repeat("x", brokenBytes))
+		fmt.Fprintf(w, "event: message\ndata: %s\n\n", inboxNotification)
+	})
+
+	var logBuf lockedBuffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	c, err := agenthub.New(srv.URL, "ghp_test", "bridge-test", "", agenthub.WithLogger(logger))
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	var fired atomic.Bool
+	c.OnInboxPush(func() {
+		if fired.CompareAndSwap(false, true) {
+			close(done)
+		}
+	})
+	ctx := t.Context()
+	if err := c.Initialize(ctx); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	if err := c.StartSSE(ctx); err != nil {
+		t.Fatalf("StartSSE: %v", err)
+	}
+	t.Cleanup(c.StopSSE)
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout: valid event after a broken one did not reach the callback")
+	}
+
+	var line string
+	for _, l := range strings.Split(logBuf.String(), "\n") {
+		if strings.Contains(l, "dropping event: invalid JSON") {
+			line = l
+			break
+		}
+	}
+	if line == "" {
+		t.Fatalf("no debug log for the invalid JSON event:\n%s", logBuf.String())
+	}
+	if !strings.Contains(line, "level=DEBUG") {
+		t.Errorf("invalid JSON should be logged at DEBUG: %q", line)
+	}
+	// 全長は数値で残り、本体は切り詰められていること。
+	m := regexp.MustCompile(`raw (\d+) bytes`).FindStringSubmatch(line)
+	if m == nil {
+		t.Fatalf("log lacks raw size info: %q", line)
+	}
+	if n, _ := strconv.Atoi(m[1]); n < brokenBytes {
+		t.Errorf("raw size %d is not the full payload length (want >= %d)", n, brokenBytes)
+	}
+	if !regexp.MustCompile(`first \d+: `).MatchString(line) {
+		t.Errorf("log lacks truncation marker: %q", line)
+	}
+	if len(line) >= brokenBytes {
+		t.Errorf("log line not truncated: %d bytes (payload was %d bytes)", len(line), brokenBytes)
 	}
 }

@@ -629,6 +629,11 @@ func (c *Client) runSSELoop(ctx context.Context, sid string) error {
 func (c *Client) handleSSEEvent(ctx context.Context, sid string, data []byte) {
 	var msg pingMessage
 	if err := json.Unmarshal(data, &msg); err != nil {
+		// 無言で落とすと切り分けできない (終端時 flush された断片もここに来る — issue #63)。
+		// payload は rawSnippet で切り詰め、巨大な壊れ行がログを埋めないようにする。
+		c.log().Debug("[agent-hub-sdk][sse] dropping event: invalid JSON",
+			"err", err,
+			"raw", rawSnippet(data))
 		return
 	}
 	switch msg.Method {
