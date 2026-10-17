@@ -99,6 +99,22 @@ npm install github:kishibashi3/agent-hub-sdk
 
 Tag releases as `vX.Y.Z` on `main`. Consumers can pin a tag.
 
+### Version bump checklist
+
+The version string lives in more than one file. Bump them together in the release PR:
+
+| File | How |
+|---|---|
+| `CHANGELOG.md` | add the release section |
+| `js/package.json` | edit `version` |
+| `js/package-lock.json` | `cd js && npm install --package-lock-only` (updates both `version` and `packages[""].version`) |
+| `python/src/agent_hub_sdk/version.py` | edit `__version__` (`python/pyproject.toml` reads it via `dynamic = ["version"]`) |
+
+`npm install` / `npm ci` rewrite the lock's version from `package.json`, so a stale
+lock never breaks a build — which is exactly why it drifts unnoticed (issue #69: it sat
+at `0.4.0` while `package.json` was `0.10.0`). Run the `--package-lock-only` step and
+commit the result so the lock stays an accurate record.
+
 ### After tagging: bump the SDK ref in agent-hub-bridges CI
 
 The agent-hub-bridges CI (`.github/workflows/ci.yml`) checks out this SDK at a fixed commit SHA (`env.AGENT_HUB_SDK_REF`), so it does not pick up a new release on its own. If nobody bumps it, bridges CI keeps passing against an old SDK. After each release:
