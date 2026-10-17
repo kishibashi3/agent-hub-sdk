@@ -524,10 +524,6 @@ func TestGetMessages_brokenLargePayload_errorIsTruncated(t *testing.T) {
 	}
 
 	msg := err.Error()
-	// payload 本体は 2048 バイトまで。付随テキストを足しても 4 KiB には収まる。
-	if len(msg) > 4096 {
-		t.Errorf("error message not truncated: %d bytes (payload was %d bytes)", len(msg), brokenBytes)
-	}
 	// 全長は数値として残っていること (切り分けに必要)。
 	// 切り詰め後の長さ (2048) を報告する退行を落とすため、実際の値まで検証する。
 	m := regexp.MustCompile(`raw (\d+) bytes`).FindStringSubmatch(msg)
@@ -542,10 +538,34 @@ func TestGetMessages_brokenLargePayload_errorIsTruncated(t *testing.T) {
 	if reported < brokenBytes {
 		t.Errorf("raw size %d is not the full payload length (want >= %d): %q", reported, brokenBytes, msg)
 	}
-	if !strings.Contains(msg, "first 2048") {
-		t.Errorf("error message lacks truncation marker: %q", msg)
+	// truncation marker は "first N: <quoted snippet>"。N は errRawSnippetBytes だが
+	// 定数の値には依存させず、N と実際に埋め込まれた snippet 長の整合で検証する。
+	tm := truncMarkerRe.FindStringSubmatch(msg)
+	if tm == nil {
+		t.Fatalf("error message lacks truncation marker: %q", msg)
+	}
+	limit, convErr := strconv.Atoi(tm[1])
+	if convErr != nil {
+		t.Fatalf("snippet limit is not a number: %q", tm[1])
+	}
+	if limit <= 0 || limit >= reported {
+		t.Errorf("snippet limit %d is not a truncation of %d bytes", limit, reported)
+	}
+	snippet, unqErr := strconv.Unquote(tm[2])
+	if unqErr != nil {
+		t.Fatalf("snippet is not a valid quoted string: %v", unqErr)
+	}
+	if len(snippet) != limit {
+		t.Errorf("snippet length = %d, want %d (as reported by marker)", len(snippet), limit)
+	}
+	// snippet 以外の付随テキストは小さいこと (payload 全体を抱えていないこと)。
+	if overhead := len(msg) - len(tm[2]); overhead > 1024 {
+		t.Errorf("error message not truncated: %d bytes besides snippet (payload was %d bytes)", overhead, brokenBytes)
 	}
 }
+
+// truncMarkerRe は rawSnippet の truncation marker "first N: <%q snippet>" を拾う。
+var truncMarkerRe = regexp.MustCompile(`first (\d+): ("(?:[^"\\]|\\.)*")`)
 
 // 小さい payload はそのまま全部出る (truncate しない)。
 func TestGetMessages_brokenSmallPayload_errorKeepsFullRaw(t *testing.T) {
@@ -566,7 +586,7 @@ func TestGetMessages_brokenSmallPayload_errorKeepsFullRaw(t *testing.T) {
 		t.Fatal("want unmarshal error for broken payload")
 	}
 	msg := err.Error()
-	if strings.Contains(msg, "first 2048") {
+	if truncMarkerRe.MatchString(msg) {
 		t.Errorf("small payload should not be truncated: %q", msg)
 	}
 	if !strings.Contains(msg, strings.Repeat("x", brokenBytes)) {
