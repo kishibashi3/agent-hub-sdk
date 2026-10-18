@@ -53,3 +53,35 @@ func ParseMessages(text string) ([]Message, error) {
 	}
 	return msgs, nil
 }
+
+// Thread は agent-hub の get_thread が返すスレッド (caused_by 鎖) 全体。
+// wire format: {root_id, thread_size, messages[]}
+// Messages は時系列順 (古い順)。root の CausedBy は空文字列。
+type Thread struct {
+	RootID     string    `json:"root_id"`
+	ThreadSize int       `json:"thread_size"`
+	Messages   []Message `json:"messages"`
+}
+
+// ParseThread は get_thread ツールのテキスト結果 (JSON object) をパースする。
+//
+// server は閲覧権限なし・存在しない ID 等の失敗を isError ではなく
+// {"error": "..."} のテキストで返すため、error フィールドがあれば error を返す。
+// 空配列の成功と取り違えないよう、root_id が無い応答も error とする。
+func ParseThread(text string) (*Thread, error) {
+	var raw struct {
+		Thread
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(text), &raw); err != nil {
+		return nil, fmt.Errorf("get_thread parse: %w", err)
+	}
+	if raw.Error != "" {
+		return nil, fmt.Errorf("server error: %s", raw.Error)
+	}
+	if raw.RootID == "" {
+		return nil, fmt.Errorf("get_thread parse: root_id missing (%s)", rawSnippet([]byte(text)))
+	}
+	th := raw.Thread
+	return &th, nil
+}

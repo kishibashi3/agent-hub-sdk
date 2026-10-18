@@ -295,6 +295,32 @@ func (c *Client) MarkAsRead(ctx context.Context, msgID string) error {
 	return nil
 }
 
+// GetThread は messageID が属する caused_by 鎖 (スレッド) を hub の get_thread で取得する。
+// messageID は鎖のどの便の ID でもよい (server が root に解決する)。
+//
+// limit は root を除いた返信の最大件数。0 以下なら省略し server 既定 (100) に任せる
+// (server 側の上限は 500)。server は返信を古い順に limit 件取るため、
+// 長い鎖では新しい側が切り落とされる。
+//
+// 閲覧権限なし (鎖に sender / recipient として参加していない)・存在しない ID 等の
+// 失敗は error で返す。server はこれらを isError ではなく {"error": "..."} の
+// テキストで返すので、ParseThread で検出する。
+func (c *Client) GetThread(ctx context.Context, messageID string, limit int) (*Thread, error) {
+	args := map[string]any{"message_id": messageID}
+	if limit > 0 {
+		args["limit"] = limit
+	}
+	text, err := c.callToolText(ctx, "get_thread", args)
+	if err != nil {
+		return nil, fmt.Errorf("get_thread %s: %w", messageID, err)
+	}
+	th, err := ParseThread(text)
+	if err != nil {
+		return nil, fmt.Errorf("get_thread %s: %w", messageID, err)
+	}
+	return th, nil
+}
+
 // SendMessage は指定の宛先に DM を送る。
 // causedBy が空文字列の場合は省略される (因果チェーン任意)。
 func (c *Client) SendMessage(ctx context.Context, to, body, causedBy string) error {

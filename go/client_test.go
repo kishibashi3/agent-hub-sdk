@@ -805,3 +805,121 @@ func TestOversizedWarn_firesAgainWhenSizeDoubles(t *testing.T) {
 		t.Errorf("want a second WARN once the line size doubled, got %d:\n%s", got, buf.String())
 	}
 }
+
+// ──────────────────────────────────────────────────────────────────────── //
+// GetThread (issue #81)                                                   //
+// ──────────────────────────────────────────────────────────────────────── //
+
+// newGetThreadServer は tools/call に対して toolText を text content として返し、
+// 受け取った arguments を gotArgs に記録するテストサーバを生成する。
+func newGetThreadServer(t *testing.T, toolText string, gotArgs *map[string]any) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("mcp-session-id", "test-session-id")
+		var req struct {
+			Method string `json:"method"`
+			ID     *int64 `json:"id"`
+			Params struct {
+				Name      string         `json:"name"`
+				Arguments map[string]any `json:"arguments"`
+			} `json:"params"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		w.Header().Set("Content-Type", "application/json")
+		switch req.Method {
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		case "tools/call":
+			if req.Params.Name != "get_thread" {
+				t.Errorf("tool name = %q, want get_thread", req.Params.Name)
+			}
+			*gotArgs = req.Params.Arguments
+			text, _ := json.Marshal(toolText)
+			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{"content":[{"type":"text","text":%s}]}}`, *req.ID, text)
+		default:
+			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{}}`, *req.ID)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func getThreadVia(t *testing.T, toolText string, limit int) (*agenthub.Thread, map[string]any, error) {
+	t.Helper()
+	var gotArgs map[string]any
+	srv := newGetThreadServer(t, toolText, &gotArgs)
+	c, err := agenthub.New(srv.URL, "ghp_test", "bridge-test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Initialize(t.Context()); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	th, err := c.GetThread(t.Context(), "msg-c", limit)
+	return th, gotArgs, err
+}
+
+func TestGetThread_parsesThread(t *testing.T) {
+	const text = `{
+  "root_id": "msg-a",
+  "thread_size": 3,
+  "messages": [
+    {"id":"msg-a","from":"@alice","to":"@bob","message":"A","caused_by":null,"timestamp":"2026-10-17T00:00:00.000Z"},
+    {"id":"msg-b","from":"@bob","to":"@alice","message":"B","caused_by":"msg-a","timestamp":"2026-10-17T00:00:01.000Z"},
+    {"id":"msg-c","from":"@alice","to":"@bob","message":"C","caused_by":"msg-b","timestamp":"2026-10-17T00:00:02.000Z"}
+  ]
+}`
+	th, args, err := getThreadVia(t, text, 0)
+	if err != nil {
+		t.Fatalf("GetThread: %v", err)
+	}
+	if args["message_id"] != "msg-c" {
+		t.Errorf("message_id = %v, want msg-c", args["message_id"])
+	}
+	if _, ok := args["limit"]; ok {
+		t.Errorf("limit should be omitted when 0, got %v", args["limit"])
+	}
+	if th.RootID != "msg-a" || th.ThreadSize != 3 || len(th.Messages) != 3 {
+		t.Fatalf("unexpected thread: %+v", th)
+	}
+	want := []struct{ id, from, causedBy string }{
+		{"msg-a", "@alice", ""}, {"msg-b", "@bob", "msg-a"}, {"msg-c", "@alice", "msg-b"},
+	}
+	for i, w := range want {
+		m := th.Messages[i]
+		if m.ID != w.id || m.Sender != w.from || m.CausedBy != w.causedBy {
+			t.Errorf("messages[%d] = %+v, want id=%s from=%s caused_by=%q", i, m, w.id, w.from, w.causedBy)
+		}
+	}
+}
+
+func TestGetThread_sendsLimit(t *testing.T) {
+	_, args, err := getThreadVia(t, `{"root_id":"msg-a","thread_size":1,"messages":[]}`, 2)
+	if err != nil {
+		t.Fatalf("GetThread: %v", err)
+	}
+	if args["limit"] != float64(2) {
+		t.Errorf("limit = %v, want 2", args["limit"])
+	}
+}
+
+// server は権限なし等を isError ではなく {"error": ...} の成功テキストで返す。
+// 空の成功として扱わず error にすること。
+func TestGetThread_serverErrorTextIsError(t *testing.T) {
+	th, _, err := getThreadVia(t, `{"error":"スレッド msg-a を閲覧する権限がありません"}`, 0)
+	if err == nil {
+		t.Fatalf("want error, got thread %+v", th)
+	}
+	if !strings.Contains(err.Error(), "閲覧する権限がありません") {
+		t.Errorf("error should carry server message, got: %v", err)
+	}
+}
+
+func TestParseThread_missingRootIDIsError(t *testing.T) {
+	if _, err := agenthub.ParseThread(`{}`); err == nil {
+		t.Fatal("want error for response without root_id")
+	}
+	if _, err := agenthub.ParseThread(`not json`); err == nil {
+		t.Fatal("want error for non-JSON text")
+	}
+}

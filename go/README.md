@@ -85,6 +85,7 @@ warnings separates it from any oversize warning the embedding process emits itse
 | `GetMessages(ctx) ([]Message, error)` | Poll unread messages |
 | `MarkAsRead(ctx, msgID string) error` | Acknowledge a message |
 | `SendMessage(ctx, to, body, causedBy string) error` | Send DM; pass `""` causedBy to omit |
+| `GetThread(ctx, messageID string, limit int) (*Thread, error)` | Fetch the `caused_by` chain containing `messageID`, oldest first. `limit` caps replies (root excluded); `<= 0` uses the server default (100). Permission denied / unknown ID return an error |
 
 ### `Message`
 
