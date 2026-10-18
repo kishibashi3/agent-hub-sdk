@@ -49,6 +49,7 @@ Creates a new client. Call `Initialize` before any tool calls.
 **Options:**
 - `WithClientName(name string)` — override `clientInfo.name` in MCP handshake (default: `"agent-hub-sdk-go"`)
 - `WithHTTPTimeout(d time.Duration)` — override HTTP timeout (default: 90s)
+- `WithLogger(l *slog.Logger)` — inject the logger used for the SDK's SSE warnings (default: `slog.Default()`, resolved at call time). Note: `CommandRouter` still logs via `slog.Default()` directly and is not affected.
 
 ## SSE line length: no limit (issue #60)
 
@@ -66,6 +67,14 @@ A line at or above **1 MiB** is still read in full, but logs a `WARN` via `log/s
 with the received size in bytes. Unbounded reads must not mean unnoticed growth: the
 warning is the signal that a backlog is building up (or that the hub is returning far
 more than it should).
+
+The warning is **rate-limited per client**: it fires once, then again only once the
+line size has doubled. A backlog that merely sits above the threshold is polled
+repeatedly (each RPC builds a fresh reader), so warning per line would report
+"still stuck" thousands of times a day instead of "getting worse".
+
+The message is prefixed `[agent-hub-sdk][sse]` so that grepping logs for oversize
+warnings separates it from any oversize warning the embedding process emits itself.
 
 ### Methods
 
