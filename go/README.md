@@ -100,6 +100,48 @@ type Message struct {
 }
 ```
 
+## Concurrency: one goroutine for RPCs (issue #84)
+
+A `Client` is **not safe for concurrent RPCs**. Call the RPC methods (`Initialize`,
+`Register`, `GetMessages`, `MarkAsRead`, `SendMessage`, `GetThread`, `SubscribeInbox`)
+from one goroutine at a time. The session ID is read and written without
+synchronization, so two goroutines calling RPCs on the same `Client` is a data race
+(`go test -race` reports it). If you need RPCs from several goroutines, serialize them
+with your own `sync.Mutex`, or give each goroutine its own `Client`.
+
+These are fine to run alongside the RPC goroutine:
+
+- The SSE goroutine started by `StartSSE`. It keeps its own copy of the session ID and
+  answers pings with a separate HTTP client.
+- `OnInboxPush`. Registering the callback is goroutine-safe.
+
+**The `OnInboxPush` callback runs on the SSE goroutine.** Calling an RPC from inside it
+(for example `GetMessages`) is concurrent use and races with your RPC goroutine. Have the
+callback only signal your RPC goroutine, for example with a buffered channel:
+
+```go
+pushCh := make(chan struct{}, 1)
+c.OnInboxPush(func() {
+    select {
+    case pushCh <- struct{}{}:
+    default: // a fetch is already pending
+    }
+})
+
+for {
+    select {
+    case <-ctx.Done():
+        return
+    case <-pushCh:
+        msgs, err := c.GetMessages(ctx) // RPCs stay on this goroutine
+        // ...
+    }
+}
+```
+
+Reconnecting (`StopSSE` → `Initialize` → `Register` → `StartSSE`) should also run on
+the RPC goroutine, in that order.
+
 ## Requirements
 
 - Go 1.22+
