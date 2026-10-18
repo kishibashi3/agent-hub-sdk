@@ -1221,9 +1221,10 @@ func (b *lockedBuffer) String() string {
 	return b.buf.String()
 }
 
-// SSE ストリームと RPC poll の両方から warnOversizedLine を並行に叩いても、
-// データ競合なく (-race) WARN が 1 回に収まること。
+// SSE ストリームと RPC poll の両方から warnOversizedLine を叩いても、WARN が 1 回に収まること。
 // 行サイズはどちらも 2 MiB 前後で、互いに 2 倍未満なのでレート制限上は 1 回。
+// 実際の呼び出しはほぼ直列で CAS の衝突経路を通らないため、sseWarnedBytes の atomic 退行は
+// このテストでは検出できない — それは TestOversizedWarn_concurrentCallersContendOnCAS が守る (issue #94)。
 func TestOversizedWarn_concurrentSSEAndPolls(t *testing.T) {
 	const (
 		lineBytes = 2 << 20 // 閾値 1 MiB 超え
@@ -1308,6 +1309,39 @@ func TestOversizedWarn_concurrentSSEAndPolls(t *testing.T) {
 
 	if got := countOversizedWarns(logBuf.String()); got != 1 {
 		t.Errorf("want exactly 1 WARN across concurrent SSE + polls, got %d:\n%s", got, logBuf.String())
+	}
+}
+
+// 複数 goroutine が同時に warnOversizedLine を呼んでも、データ競合なく (-race) WARN が 1 回に収まること。
+// 開始チャネルで一斉に放し、「全員が 0 を Load し、CAS に負けた側が再試行する」経路を通す。
+// sseWarnedBytes を atomic でない int64 に戻すと -race で DATA RACE になる (issue #94)。
+func TestOversizedWarn_concurrentCallersContendOnCAS(t *testing.T) {
+	const (
+		lineBytes = 2 << 20 // 閾値 1 MiB 超え
+		callers   = 8
+	)
+	var logBuf lockedBuffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	c, err := agenthub.New("http://127.0.0.1:0", "ghp_test", "bridge-test", "", agenthub.WithLogger(logger))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			c.WarnOversizedLineForTest(lineBytes)
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if got := countOversizedWarns(logBuf.String()); got != 1 {
+		t.Errorf("want exactly 1 WARN across %d concurrent callers, got %d:\n%s", callers, got, logBuf.String())
 	}
 }
 
