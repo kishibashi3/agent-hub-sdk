@@ -38,7 +38,6 @@ package agenthub
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"strings"
 )
 
@@ -150,7 +149,7 @@ func (r *CommandRouter) Handle(ctx context.Context, client *Client, msg Message)
 		return false
 	}
 
-	slog.Debug("[command] received", "cmd", cmd, "from", msg.Sender, "msg_id", msg.ID)
+	client.log().Debug("[command] received", "cmd", cmd, "from", msg.Sender, "msg_id", msg.ID)
 
 	// 1. カスタムハンドラ優先
 	if fn, ok := r.handlers[cmd]; ok {
@@ -159,26 +158,26 @@ func (r *CommandRouter) Handle(ctx context.Context, client *Client, msg Message)
 		// 2. 組み込みハンドラ
 		switch cmd {
 		case "/ping":
-			slog.Info("[command] /ping", "from", msg.Sender)
+			client.log().Info("[command] /ping", "from", msg.Sender)
 			r.sendReply(ctx, client, msg, "pong")
 		case "/status":
 			status := r.statusFn()
-			slog.Info("[command] /status", "from", msg.Sender, "status", status)
+			client.log().Info("[command] /status", "from", msg.Sender, "status", status)
 			r.sendReply(ctx, client, msg, status)
 		case "/help":
-			slog.Info("[command] /help", "from", msg.Sender)
+			client.log().Info("[command] /help", "from", msg.Sender)
 			r.sendReply(ctx, client, msg, r.generateHelp())
 		case "/restart":
 			r.runRestart(ctx, client, msg)
 		default:
 			// 3. 未知コマンド
-			slog.Info("[command] unknown command", "cmd", cmd, "from", msg.Sender)
+			client.log().Info("[command] unknown command", "cmd", cmd, "from", msg.Sender)
 			r.sendReply(ctx, client, msg, fmt.Sprintf("command not found: %s", cmd))
 		}
 	}
 
 	if err := client.MarkAsRead(ctx, msg.ID); err != nil {
-		slog.Warn("[command] MarkAsRead failed", "msg_id", msg.ID, "err", err)
+		client.log().Warn("[command] MarkAsRead failed", "msg_id", msg.ID, "err", err)
 	}
 	return true
 }
@@ -191,7 +190,7 @@ func (r *CommandRouter) sendReply(ctx context.Context, client *Client, msg Messa
 		return
 	}
 	if err := client.SendMessage(ctx, msg.Sender, text, msg.ID); err != nil {
-		slog.Warn("[command] reply failed", "cmd_preview", truncateCmd(msg.Body), "err", err)
+		client.log().Warn("[command] reply failed", "cmd_preview", truncateCmd(msg.Body), "err", err)
 	}
 }
 
@@ -203,7 +202,7 @@ func (r *CommandRouter) runCustomHandler(
 ) {
 	reply, err := fn(ctx, client, msg, args)
 	if err != nil {
-		slog.Warn("[command] handler error", "cmd", cmd, "from", msg.Sender, "err", err)
+		client.log().Warn("[command] handler error", "cmd", cmd, "from", msg.Sender, "err", err)
 		r.sendReply(ctx, client, msg, fmt.Sprintf("⚠ command %s failed: see bridge log", cmd))
 		return
 	}
@@ -217,15 +216,15 @@ func (r *CommandRouter) runCustomHandler(
 // restartFn が nil の場合は ack-only (返信なし)。
 func (r *CommandRouter) runRestart(ctx context.Context, client *Client, msg Message) {
 	if r.restartFn == nil {
-		slog.Info("[command] /restart (no handler, ack-only)", "from", msg.Sender)
+		client.log().Info("[command] /restart (no handler, ack-only)", "from", msg.Sender)
 		return
 	}
 
-	slog.Info("[command] /restart accepted", "from", msg.Sender)
+	client.log().Info("[command] /restart accepted", "from", msg.Sender)
 	r.sendReply(ctx, client, msg, "restarting...")
 
 	if err := r.restartFn(ctx); err != nil {
-		slog.Warn("[command] /restart handler failed", "err", err)
+		client.log().Warn("[command] /restart handler failed", "err", err)
 		r.sendReply(ctx, client, msg, "⚠ /restart failed: see bridge log")
 		return
 	}

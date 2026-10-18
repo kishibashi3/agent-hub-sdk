@@ -1,8 +1,14 @@
 package agenthub_test
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	agenthub "github.com/kishibashi3/agent-hub-sdk/go"
@@ -207,4 +213,69 @@ func TestNewCommandRouter(t *testing.T) {
 		return "second", nil
 	})
 	// no panic
+}
+
+// ── WithLogger (issue #78) ───────────────────────────────────────────────────
+
+// TestCommandRouter_LogsGoToInjectedLogger は WithLogger で注入したロガーに
+// CommandRouter のログ (11 箇所すべての経路) が出ることを確認する。
+// slog.Default() に直書きする呼び出しが残っていると、その経路のログは
+// 注入先に現れずに失敗する。
+func TestCommandRouter_LogsGoToInjectedLogger(t *testing.T) {
+	// 全 RPC を 500 で返し、SendMessage / MarkAsRead の失敗経路も通す
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	client, err := agenthub.New(srv.URL, "pat", "@me", "", agenthub.WithLogger(logger))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name  string
+		setup func(r *agenthub.CommandRouter)
+		body  string
+		want  []string
+	}{
+		{"ping", nil, "/ping", []string{
+			"[command] received", "[command] /ping",
+			"[command] reply failed", "[command] MarkAsRead failed",
+		}},
+		{"status", nil, "/status", []string{"[command] /status"}},
+		{"help", nil, "/help", []string{"[command] /help"}},
+		{"unknown", nil, "/nope", []string{"[command] unknown command"}},
+		{"handler error", func(r *agenthub.CommandRouter) {
+			r.Register("/fail", "always fails", func(context.Context, *agenthub.Client, agenthub.Message, string) (string, error) {
+				return "", errors.New("handler boom")
+			})
+		}, "/fail", []string{"[command] handler error"}},
+		{"restart ack-only", nil, "/restart", []string{"[command] /restart (no handler, ack-only)"}},
+		{"restart failed", func(r *agenthub.CommandRouter) {
+			r.SetRestartHandler(func(context.Context) error { return errors.New("restart boom") })
+		}, "/restart", []string{"[command] /restart accepted", "[command] /restart handler failed"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			buf.Reset()
+			router := agenthub.NewCommandRouter()
+			if tc.setup != nil {
+				tc.setup(router)
+			}
+			msg := agenthub.Message{ID: "m1", Sender: "@alice", Body: tc.body}
+			if !router.Handle(context.Background(), client, msg) {
+				t.Fatalf("Handle(%q) returned false", tc.body)
+			}
+			logged := buf.String()
+			for _, w := range tc.want {
+				if !strings.Contains(logged, w) {
+					t.Errorf("injected logger should contain %q, got:\n%s", w, logged)
+				}
+			}
+		})
+	}
 }
