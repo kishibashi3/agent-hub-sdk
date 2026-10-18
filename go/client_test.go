@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1076,5 +1077,124 @@ func TestRunSSELoop_smallErrorBodyIsKept(t *testing.T) {
 	err = c.RunSSELoopForTest(t.Context(), "test-session-id")
 	if err == nil || !strings.Contains(err.Error(), detail) {
 		t.Fatalf("want the full body in the error, got %v", err)
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────── //
+// SSE unmarshal 失敗時の Debug ログ (issue #79)                            //
+// ──────────────────────────────────────────────────────────────────────── //
+
+// logSink は SSE goroutine が書く slog 出力を受け取る io.Writer。
+// bytes.Buffer は goroutine 安全ではないため mutex で包み、want を含む行が
+// 書かれた時点で ready を閉じてテスト側の待ち合わせに使う。
+type logSink struct {
+	mu    sync.Mutex
+	buf   bytes.Buffer
+	want  string
+	once  sync.Once
+	ready chan struct{}
+}
+
+func newLogSink(want string) *logSink {
+	return &logSink{want: want, ready: make(chan struct{})}
+}
+
+func (s *logSink) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n, err := s.buf.Write(p)
+	if strings.Contains(s.buf.String(), s.want) {
+		s.once.Do(func() { close(s.ready) })
+	}
+	return n, err
+}
+
+func (s *logSink) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
+// startSSEWithDebugLog は Debug レベルの logger を注入した client で SSE を開始し、
+// sink に want が現れるまで待つ。現れなければ t.Fatal。
+func startSSEWithDebugLog(t *testing.T, srv *httptest.Server, want string) *logSink {
+	t.Helper()
+	sink := newLogSink(want)
+	logger := slog.New(slog.NewTextHandler(sink, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	c, err := agenthub.New(srv.URL, "ghp_test", "bridge-test", "", agenthub.WithLogger(logger))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+	if err := c.Initialize(ctx); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	if err := c.StartSSE(ctx); err != nil {
+		t.Fatalf("StartSSE: %v", err)
+	}
+	t.Cleanup(c.StopSSE)
+
+	select {
+	case <-sink.ready:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout: no log line containing %q; got:\n%s", want, sink.String())
+	}
+	return sink
+}
+
+// 壊れた JSON を無言で捨てず、切り分け用の Debug ログを 1 行残すこと (issue #79)。
+// 修正前は handleSSEEvent が unmarshal エラーで無言 return していた。
+func TestSSEStream_logsUnparsableEvent(t *testing.T) {
+	const broken = `{"jsonrpc":"2.0","method":`
+	srv := sseStreamServer(t, func(w http.ResponseWriter) {
+		writeSSEHeaders(w)
+		fmt.Fprintf(w, "event: message\ndata: %s\n\n", broken)
+	})
+
+	got := startSSEWithDebugLog(t, srv, "not valid JSON").String()
+	if !strings.Contains(got, "level=DEBUG") {
+		t.Errorf("want the drop reported at DEBUG level, got:\n%s", got)
+	}
+	// payload は rawSnippet の %q と slog TextHandler の quoting で二重に escape される
+	// ため生文字列では一致しない。全長と、escape を挟んでも残る識別可能な断片で見る。
+	if !strings.Contains(got, fmt.Sprintf("raw %d bytes", len(broken))) {
+		t.Errorf("want the payload length reported, got:\n%s", got)
+	}
+	if !strings.Contains(got, "jsonrpc") {
+		t.Errorf("log should carry the offending payload, got:\n%s", got)
+	}
+	// unmarshal エラー自体も落とさないこと
+	if !strings.Contains(got, "unexpected end of JSON input") {
+		t.Errorf("want the unmarshal error preserved, got:\n%s", got)
+	}
+}
+
+// 壊れた payload が巨大でもログは rawSnippet の方針 (全長 + 先頭 N バイト) で
+// 切り詰められ、全長は数値で残ること。N は errRawSnippetBytes 依存なので literal で
+// 比較しない (issue #77 と同じ方針)。
+func TestSSEStream_unparsableEventLogIsTruncated(t *testing.T) {
+	broken := `{"jsonrpc":"2.0","method":` + strings.Repeat("x", 8192)
+	srv := sseStreamServer(t, func(w http.ResponseWriter) {
+		writeSSEHeaders(w)
+		fmt.Fprintf(w, "event: message\ndata: %s\n\n", broken)
+	})
+
+	got := startSSEWithDebugLog(t, srv, "not valid JSON").String()
+
+	m := regexp.MustCompile(`raw (\d+) bytes, first (\d+):`).FindStringSubmatch(got)
+	if m == nil {
+		t.Fatalf("want a truncation marker of the form %q, got:\n%s", "raw N bytes, first M:", got)
+	}
+	full, _ := strconv.Atoi(m[1])
+	if full != len(broken) {
+		t.Errorf("want the full payload length %d reported, got %d", len(broken), full)
+	}
+	limit, _ := strconv.Atoi(m[2])
+	if limit >= full {
+		t.Errorf("payload was not truncated: first %d of %d bytes", limit, full)
+	}
+	// 切り詰めたのに全文が載っていたら意味がない
+	if strings.Contains(got, strings.Repeat("x", 8192)) {
+		t.Errorf("the full payload leaked into the log despite the truncation marker")
 	}
 }

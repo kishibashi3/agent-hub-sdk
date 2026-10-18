@@ -677,6 +677,14 @@ func (c *Client) runSSELoop(ctx context.Context, sid string) error {
 func (c *Client) handleSSEEvent(ctx context.Context, sid string, data []byte) {
 	var msg pingMessage
 	if err := json.Unmarshal(data, &msg); err != nil {
+		// 無言 return だと「イベントが届いていない」のか「届いたが解釈できなかった」のか
+		// 切り分けられない。#63 で改行終端していない断片も終端時に flush するようになり、
+		// ここへ流れ込む入力の発生源が増えたため切り分け用の 1 行を残す (issue #79)。
+		// 壊れた payload 自体が巨大な場合があるので rawSnippet で全長 + 先頭
+		// errRawSnippetBytes バイトに切り詰める (#68 と同じ方針)。
+		c.log().Debug("[agent-hub-sdk][sse] dropped an event that is not valid JSON",
+			"error", err,
+			"payload", rawSnippet(data))
 		return
 	}
 	switch msg.Method {
