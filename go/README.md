@@ -111,12 +111,12 @@ with your own `sync.Mutex`, or give each goroutine its own `Client`.
 
 These are fine to run alongside the RPC goroutine:
 
-- The SSE goroutine started by `StartSSE`. It keeps its own copy of the session ID and
-  answers pings with a separate HTTP client.
+- The SSE goroutine started by `StartSSE`. It keeps its own copy of the session ID, so
+  answering pings does not touch the shared session ID.
 - `OnInboxPush`. Registering the callback is goroutine-safe.
 
-**The `OnInboxPush` callback runs on the SSE goroutine.** Calling an RPC from inside it
-(for example `GetMessages`) is concurrent use and races with your RPC goroutine. Have the
+**The `OnInboxPush` callback runs on a new goroutine for each push.** Calling an RPC from
+inside it (for example `GetMessages`) is concurrent use and races with your RPC goroutine. Have the
 callback only signal your RPC goroutine, for example with a buffered channel:
 
 ```go
@@ -139,8 +139,10 @@ for {
 }
 ```
 
-Reconnecting (`StopSSE` → `Initialize` → `Register` → `StartSSE`) should also run on
-the RPC goroutine, in that order.
+Reconnecting (`StopSSE` → `Initialize` → `Register` → `StartSSE` → `SubscribeInbox`)
+should also run on the RPC goroutine, in that order. `Initialize` starts a new session,
+so you must call `SubscribeInbox` again. If you skip it, no error is returned but pushes
+stop arriving.
 
 ## Requirements
 
