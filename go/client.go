@@ -87,7 +87,7 @@ type Client struct {
 	userID     string
 	tenantID   string
 	clientName string
-	sessionID  string   // single-goroutine 前提; 並列アクセス不可
+	sessionID  string // single-goroutine 前提; 並列アクセス不可
 	reqIDSeq   atomic.Int64
 	httpClient *http.Client
 	// sseClient は SSE ストリーム (GET /mcp) 専用クライアント (Timeout=0 = long-lived)。

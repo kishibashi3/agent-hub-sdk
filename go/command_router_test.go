@@ -12,8 +12,8 @@ import (
 
 func TestParseCommand(t *testing.T) {
 	cases := []struct {
-		body    string
-		wantCmd string
+		body     string
+		wantCmd  string
 		wantArgs string
 	}{
 		{"/ping", "/ping", ""},
