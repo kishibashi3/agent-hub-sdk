@@ -78,8 +78,8 @@ const (
 //
 // SSE goroutine (StartSSE が起動する) は sessionID を初期化時のスナップショットで
 // 保持するため、main goroutine の sessionID アクセスと競合しない。
-// sendPong は sseClient (Timeout=0 専用クライアント) を使い、
-// main goroutine の httpClient 呼び出しと独立して並列動作する。
+// sendPong は main goroutine と同じ httpClient を使うが、http.Client は
+// 複数 goroutine から同時に使っても安全なので、main goroutine の RPC と並列に動作できる。
 // inboxCallback は callbackMu で保護され、SSE goroutine からも安全に読める。
 type Client struct {
 	endpoint   string
@@ -359,8 +359,11 @@ func (c *Client) SubscribeInbox(ctx context.Context) error {
 }
 
 // OnInboxPush は inbox push 受信時に呼ばれるコールバックを登録する。
-// bridge はこのコールバックで GetMessages() をトリガーできる。
-// 複数回呼ぶと最後の登録で上書きされる。goroutine-safe。
+// コールバックは push ごとに新しい goroutine で呼ばれる。コールバック内から
+// GetMessages() などの RPC を直接呼ぶと、RPC goroutine との並行呼び出しになり
+// data race になる (README「Concurrency」節参照)。コールバックではバッファ付き
+// channel 等で RPC goroutine に通知だけ行い、GetMessages() は RPC goroutine 側で呼ぶこと。
+// 複数回呼ぶと最後の登録で上書きされる。登録 (OnInboxPush の呼び出し) 自体は goroutine-safe。
 func (c *Client) OnInboxPush(fn func()) {
 	c.callbackMu.Lock()
 	c.inboxCallback = fn
