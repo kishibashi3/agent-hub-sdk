@@ -22,9 +22,9 @@ import (
 // wire format: {id, from, to, message, caused_by, timestamp}
 type Message struct {
 	ID        string `json:"id"`
-	Sender    string `json:"from"`     // wire: "from"
+	Sender    string `json:"from"` // wire: "from"
 	To        string `json:"to"`
-	Body      string `json:"message"`  // wire: "message"
+	Body      string `json:"message"` // wire: "message"
 	CausedBy  string `json:"caused_by"`
 	Timestamp string `json:"timestamp"`
 }
