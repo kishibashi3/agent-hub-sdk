@@ -17,3 +17,7 @@ func ErrBodySnippet(r io.Reader) string { return errBodySnippet(r) }
 func (c *Client) RunSSELoopForTest(ctx context.Context, sid string) error {
 	return c.runSSELoop(ctx, sid)
 }
+
+// WarnOversizedLineForTest は warnOversizedLine を直接叩くためのテスト用フック。
+// SSE / RPC 経由では呼び出しがほぼ直列になり、CAS が衝突する経路を再現できない (issue #94)。
+func (c *Client) WarnOversizedLineForTest(n int) { c.warnOversizedLine(n) }
